@@ -3076,6 +3076,47 @@ def _streams_lock_health(timeout_seconds: float = 0.5) -> dict:
         STREAMS_LOCK.release()
 
 
+def _stream_runtime_diagnostics() -> dict:
+    """Return non-sensitive SSE stream diagnostics for health/deep status.
+
+    The WebUI chat path can feel slow or stuck when streams are alive but no
+    browser is attached, or when many events are buffering offline. This helper
+    exposes counts only — stream ids plus subscriber/buffer sizes — and avoids
+    event payloads, prompts, tool arguments, or paths.
+    """
+    streams = []
+    total_subscribers = 0
+    total_offline_buffered_events = 0
+    with STREAMS_LOCK:
+        items = list(STREAMS.items())
+    for stream_id, stream in items:
+        snapshot = {}
+        diagnostic_snapshot = getattr(stream, "diagnostic_snapshot", None)
+        if callable(diagnostic_snapshot):
+            try:
+                raw_snapshot = diagnostic_snapshot()
+                if isinstance(raw_snapshot, dict):
+                    snapshot = raw_snapshot
+            except Exception:
+                snapshot = {}
+        subscriber_count = int(snapshot.get("subscriber_count") or 0)
+        offline_buffered_events = int(snapshot.get("offline_buffered_events") or 0)
+        total_subscribers += subscriber_count
+        total_offline_buffered_events += offline_buffered_events
+        streams.append({
+            "stream_id": str(stream_id),
+            "subscriber_count": subscriber_count,
+            "offline_buffered_events": offline_buffered_events,
+        })
+    streams.sort(key=lambda item: item["stream_id"])
+    return {
+        "active_streams": len(streams),
+        "total_subscribers": total_subscribers,
+        "total_offline_buffered_events": total_offline_buffered_events,
+        "streams": streams,
+    }
+
+
 def _run_lifecycle_health() -> dict:
     """Return active worker-run state independent of SSE stream presence."""
     # Import the module rather than relying only on imported scalar aliases so
@@ -3124,6 +3165,10 @@ def _deep_health_checks(stream_check: dict | None = None) -> tuple[dict, bool]:
     checks: dict[str, dict] = {}
 
     checks["streams_lock"] = stream_check if stream_check is not None else _streams_lock_health()
+    checks["stream_runtime"] = {
+        "status": "ok",
+        **_stream_runtime_diagnostics(),
+    }
     if checks["streams_lock"].get("status") != "ok":
         return checks, False
 

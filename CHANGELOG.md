@@ -21,6 +21,9 @@
 - **PR #2599** by @Michaelyklam (refs #1925) — Add the Slice 4b `RunnerRuntimeAdapter` facade — a protocol-translator client over a future runner/sidecar backend. The facade delegates `start_run`, `observe_run`, `get_run`, and control calls to an injected runner client, normalizes results into the existing `RunStartResult`/`RunEventStream`/`RunStatus`/`ControlResult` dataclasses, carries explicit `profile`/`workspace`/`model` payload fields, and returns bounded `unsupported` control results without owning `AIAgent`, stream lifecycle, cancel/approval/clarify queues, goal state, or cached-agent table. No route wiring, no default-on runner mode, no public response-shape change.
 - **PR #2600** by @LumenYoung (refs #2266) — Slimmer WebUI follow-up from the closed LCM/context-engine PR #2266. Adds rendering and persistence for context-engine compression-anchor metadata (when present on a session or live compression event) including an "Indexed context" detail line on auto-compression cards. No agent-layer clone orchestration; WebUI-only metadata surface.
 
+
+
+- Add non-sensitive SSE stream runtime diagnostics to deep health checks, including active stream count, subscriber totals, and offline buffered-event counts for stuck or slow WebUI chat investigations.
 ## [v0.51.93] — 2026-05-19 — Release BQ (stage-386 — 10-PR full sweep batch — RFC Slice 4 runner/sidecar gate + workspace tree toggle width CSS variable + settled file:// markdown link rendering + prompt-cache coverage percentage fix + terminal shell shutdown reap + configured model picker provider preservation + profile-aware assistant display names + state.db reconciliation slice 1 + queued-message cross-session drain fix + stale-stream writeback supersede)
 
 ### Fixed

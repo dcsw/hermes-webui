@@ -4085,6 +4085,14 @@ class StreamChannel:
         for q in subscribers:
             q.put_nowait(item)
 
+    def diagnostic_snapshot(self) -> dict[str, int]:
+        """Return non-sensitive stream observation counters for health checks."""
+        with self._lock:
+            return {
+                "subscriber_count": len(self._subscribers),
+                "offline_buffered_events": len(self._offline_buffer),
+            }
+
 
 def create_stream_channel() -> StreamChannel:
     return StreamChannel()
