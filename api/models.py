@@ -115,7 +115,7 @@ def _write_session_index(updates=None):
                 if p.name.startswith('_'):
                     continue
                 try:
-                    s = Session.load(p.stem, skip_auto_save=True)
+                    s = Session.load(p.stem)
                     if s:
                         c = s.compact()
                         sid = c.get('session_id')
@@ -606,7 +606,7 @@ class Session:
             _write_session_index(updates=[self])
 
     @classmethod
-    def load(cls, sid, skip_auto_save=False):
+    def load(cls, sid):
         # Validate session ID format to prevent path traversal
         if not sid or not all(c in '0123456789abcdefghijklmnopqrstuvwxyz_' for c in sid):
             return None
@@ -615,16 +615,8 @@ class Session:
             return None
         data = json.loads(p.read_text(encoding='utf-8'))
         data['messages'], _collapsed_partials = _collapse_adjacent_duplicate_partials(data.get('messages'))
-        # Permanently strip orphaned _partial markers — they are redundant
-        # streaming artifacts. The final complete message (non-partial)
-        # already carries all content. Accumulated partials bloat the session
-        # and cause the WebUI to show empty assistant bubbles when
-        # msg_limit clips to the tail of the array.
-        _orig_msg_count = len(data.get('messages') or [])
-        data['messages'] = [m for m in (data.get('messages') or []) if not m.get('_partial')]
-        _stripped_partials = _orig_msg_count - len(data['messages'])
         session = cls(**data)
-        if (_collapsed_partials or _stripped_partials > 0) and not skip_auto_save:
+        if _collapsed_partials:
             try:
                 # Self-heal bloated sessions on first full load without touching
                 # recency/index ordering; save() creates a .bak because this
