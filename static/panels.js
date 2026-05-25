@@ -6246,6 +6246,7 @@ async function loadSettingsPanel(){
     // tells the truth before a user tries (and the backend now also returns
     // 409 as defense-in-depth).
     const pwEnvLocked=!!settings.password_env_var;
+    _settingsPasswordEnvLocked=pwEnvLocked;
     const pwLockBanner=$('settingsPasswordEnvLock');
     if(pwField){
       pwField.disabled=pwEnvLocked;
@@ -6259,7 +6260,9 @@ async function loadSettingsPanel(){
     try{
       const authStatus=await api('/api/auth/status');
       _setSettingsAuthButtonsVisible(!!authStatus.auth_enabled);
+      _syncPasswordlessButton(authStatus);
     }catch(e){}
+    loadPasskeys();
     // #1560: env-var-locked password also disables the Disable Auth button —
     // clearing settings.password_hash is silent no-op when the env var is set,
     // and the backend now returns 409 anyway, so don't offer the action.
@@ -6920,11 +6923,99 @@ async function _refreshProviderModels(providerId, btn){
   }
 }
 
+let _settingsPasswordEnvLocked=false;
 function _setSettingsAuthButtonsVisible(active){
   const signOutBtn=$('btnSignOut');
   if(signOutBtn) signOutBtn.style.display=active?'':'none';
   const disableBtn=$('btnDisableAuth');
   if(disableBtn) disableBtn.style.display=active?'':'none';
+  const passkeyBtn=$('btnRegisterPasskey');
+  if(passkeyBtn) passkeyBtn.disabled=!active||!window.PublicKeyCredential||!navigator.credentials;
+}
+function _syncPasswordlessButton(authStatus){
+  const btn=$('btnGoPasswordless');
+  if(!btn) return;
+  const can=!!(authStatus&&authStatus.auth_enabled&&authStatus.password_auth_enabled&&authStatus.passkeys_count>0&&!_settingsPasswordEnvLocked);
+  btn.style.display=can?'':'none';
+  btn.disabled=!can;
+}
+
+function _b64uToBytes(s){
+  s=String(s||'').replace(/-/g,'+').replace(/_/g,'/');
+  while(s.length%4) s+='=';
+  const bin=atob(s), out=new Uint8Array(bin.length);
+  for(let i=0;i<bin.length;i++) out[i]=bin.charCodeAt(i);
+  return out;
+}
+function _bytesToB64u(buf){
+  const bytes=new Uint8Array(buf);let bin='';
+  for(let i=0;i<bytes.length;i++) bin+=String.fromCharCode(bytes[i]);
+  return btoa(bin).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/g,'');
+}
+
+async function loadPasskeys(){
+  const list=$('passkeyList');
+  const block=$('passkeysSettingsBlock');
+  if(!list) return;
+  // Stage-batch14: respect the HERMES_WEBUI_PASSKEY feature flag — hide the
+  // whole block when passkey support is disabled at the server level so users
+  // don't see a non-functional "Add passkey" button (clicking it would 404).
+  try{
+    const status=await api('/api/auth/status');
+    if(status && status.passkey_feature_flag === false){
+      if(block) block.style.display='none';
+      return;
+    }
+    if(block) block.style.display='';
+  }catch(_e){
+    // If /api/auth/status fails, keep the block hidden to avoid showing a
+    // broken affordance.
+    if(block) block.style.display='none';
+    return;
+  }
+  if(!window.PublicKeyCredential||!navigator.credentials){
+    list.textContent='Passkeys are not supported by this browser/context.';
+    const btn=$('btnRegisterPasskey'); if(btn) btn.disabled=true;
+    return;
+  }
+  try{
+    const data=await api('/api/auth/passkeys',{method:'POST',body:'{}'});
+    if(data && data.disabled){
+      if(block) block.style.display='none';
+      return;
+    }
+    const creds=(data&&data.credentials)||[];
+    if(!creds.length){list.textContent='No passkeys registered.';return;}
+    list.innerHTML=creds.map(c=>`<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;border:1px solid var(--border);border-radius:8px;padding:8px;margin-top:6px"><span>${esc(c.label||'Passkey')}</span><button class="btn-tiny" onclick="deletePasskey('${esc(c.id)}')">Remove</button></div>`).join('');
+  }catch(e){list.textContent='Failed to load passkeys: '+e.message;}
+}
+
+async function registerPasskey(){
+  if(!window.PublicKeyCredential||!navigator.credentials){showToast('Passkeys require a supported browser and secure context.');return;}
+  const label='This device';
+  try{
+    const optData=await api('/api/auth/passkey/register/options',{method:'POST',body:'{}'});
+    const pk=optData.publicKey;
+    pk.challenge=_b64uToBytes(pk.challenge);
+    pk.user=Object.assign({},pk.user,{id:_b64uToBytes(pk.user.id)});
+    if(Array.isArray(pk.excludeCredentials)) pk.excludeCredentials=pk.excludeCredentials.map(c=>Object.assign({},c,{id:_b64uToBytes(c.id)}));
+    const cred=await navigator.credentials.create({publicKey:pk});
+    if(!cred) throw new Error('Passkey registration cancelled');
+    await api('/api/auth/passkey/register',{method:'POST',body:JSON.stringify({
+      id:cred.id,rawId:_bytesToB64u(cred.rawId),type:cred.type,label,
+      response:{clientDataJSON:_bytesToB64u(cred.response.clientDataJSON),attestationObject:_bytesToB64u(cred.response.attestationObject)}
+    })});
+    showToast('Passkey registered');
+    loadPasskeys();
+    try{_syncPasswordlessButton(await api('/api/auth/status'));}catch(_e){}
+  }catch(e){showToast('Passkey registration failed: '+e.message);}
+}
+
+async function deletePasskey(id){
+  const ok=await showConfirmDialog({title:'Remove passkey?',message:'This browser/device will no longer be able to sign in with that passkey.',confirmLabel:'Remove',danger:true,focusCancel:true});
+  if(!ok) return;
+  try{await api('/api/auth/passkey/delete',{method:'POST',body:JSON.stringify({id})});showToast('Passkey removed');loadPasskeys();try{_syncPasswordlessButton(await api('/api/auth/status'));}catch(_e){}}
+  catch(e){showToast('Failed to remove passkey: '+e.message);}
 }
 
 function _applySavedSettingsUi(saved, body, opts){
@@ -7349,17 +7440,31 @@ async function signOut(){
   }
 }
 
+async function goPasswordless(){
+  const ok=await showConfirmDialog({title:'Go passwordless?',message:'This removes the password and keeps passkey sign-in enabled. Keep at least one passkey registered or you could lose access.',confirmLabel:'Go passwordless',danger:false,focusCancel:true});
+  if(!ok) return;
+  try{
+    const saved=await api('/api/settings',{method:'POST',body:JSON.stringify({_passwordless:true})});
+    showToast('Password removed. Passkey sign-in remains enabled.');
+    _setSettingsAuthButtonsVisible(!!saved.auth_enabled);
+    _syncPasswordlessButton({auth_enabled:saved.auth_enabled,password_auth_enabled:false,passkeys_count:1});
+    const pwField=$('settingsPassword'); if(pwField) pwField.value='';
+  }catch(e){showToast('Failed to go passwordless: '+e.message);}
+}
+
 async function disableAuth(){
   const _disAuth=await showConfirmDialog({title:t('disable_auth_confirm_title'),message:t('disable_auth_confirm_message'),confirmLabel:t('disable'),danger:true,focusCancel:true});
   if(!_disAuth) return;
   try{
     await api('/api/settings',{method:'POST',body:JSON.stringify({_clear_password:true})});
     showToast(t('auth_disabled'));
-    // Hide both auth buttons since auth is now off
+    // Hide auth controls since auth is now off
     const disableBtn=$('btnDisableAuth');
     if(disableBtn) disableBtn.style.display='none';
     const signOutBtn=$('btnSignOut');
     if(signOutBtn) signOutBtn.style.display='none';
+    _syncPasswordlessButton({auth_enabled:false,password_auth_enabled:false,passkeys_count:0});
+    loadPasskeys();
   }catch(e){
     showToast(t('disable_auth_failed')+e.message);
   }

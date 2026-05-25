@@ -2489,8 +2489,68 @@ def _strip_replayed_prefix(existing_messages, candidates):
     return candidates
 
 
-def _dedupe_replayed_active_context(previous_context, result_messages):
-    """Keep model context append-only without re-appending a replayed tail."""
+def _looks_like_replayed_session_arc_summary(previous_msg, candidate_msg):
+    """Return True for repeated LCM/session summaries with refreshed hints.
+
+    LCM summary cards can be re-injected with the same long recovered context
+    and a different tail such as an expand hint. Exact identity misses those,
+    but appending both copies bloats every later model prompt.
+    """
+    if not isinstance(previous_msg, dict) or not isinstance(candidate_msg, dict):
+        return False
+    if previous_msg.get('role') != candidate_msg.get('role'):
+        return False
+    previous_text = " ".join(_message_text(previous_msg.get('content', '')).split())
+    candidate_text = " ".join(_message_text(candidate_msg.get('content', '')).split())
+    if len(previous_text) < 2000 or len(candidate_text) < 2000:
+        return False
+    marker = '[Session Arc Summary'
+    if not previous_text.startswith(marker) or not candidate_text.startswith(marker):
+        return False
+    return previous_text[:1500] == candidate_text[:1500]
+
+
+def _strip_replayed_context_items(existing_messages, candidates):
+    """Drop replayed non-adjacent context blocks before persisting context."""
+    existing_messages = list(existing_messages or [])
+    candidates = list(candidates or [])
+    if not existing_messages or not candidates:
+        return candidates
+
+    existing_keys = [_message_replay_key(m) for m in existing_messages]
+    candidate_keys = [_message_replay_key(m) for m in candidates]
+    existing_large = [m for m in existing_messages if isinstance(m, dict)]
+    cleaned = []
+    idx = 0
+    min_block = 3
+    while idx < len(candidates):
+        msg = candidates[idx]
+        if any(_looks_like_replayed_session_arc_summary(prev, msg) for prev in existing_large):
+            idx += 1
+            continue
+
+        best = 0
+        for start in range(len(existing_keys)):
+            length = 0
+            while (
+                idx + length < len(candidate_keys)
+                and start + length < len(existing_keys)
+                and candidate_keys[idx + length] == existing_keys[start + length]
+            ):
+                length += 1
+            if length > best:
+                best = length
+        if best >= min_block:
+            idx += best
+            continue
+
+        cleaned.append(msg)
+        idx += 1
+    return cleaned
+
+
+def _dedupe_replayed_context_messages(previous_context, result_messages):
+    """Keep model context append-only without replayed blocks/summaries."""
     previous_context = list(previous_context or [])
     result_messages = list(result_messages or [])
     if not previous_context or not result_messages:
@@ -2498,7 +2558,15 @@ def _dedupe_replayed_active_context(previous_context, result_messages):
     if not _messages_have_prefix(result_messages, previous_context):
         return result_messages
     candidates = result_messages[len(previous_context):]
-    return previous_context + _strip_replayed_prefix(previous_context, candidates)
+    candidates = _strip_replayed_prefix(previous_context, candidates)
+    if candidates:
+        candidates = _strip_replayed_context_items(previous_context, candidates)
+    return previous_context + candidates
+
+
+def _dedupe_replayed_active_context(previous_context, result_messages):
+    """Keep model context append-only without re-appending a replayed tail."""
+    return _dedupe_replayed_context_messages(previous_context, result_messages)
 
 
 def _is_context_compression_marker(msg):
@@ -2703,7 +2771,7 @@ def _stream_writeback_can_supersede_recovery_marker(session, msg_text):
     if last.get('type') != 'interrupted':
         return False
     content = str(last.get('content') or '')
-    if 'Response interrupted' not in content or 'WebUI process restarted' not in content:
+    if 'Response interrupted' not in content or 'before this turn finished' not in content:
         return False
 
     expected = ' '.join(str(msg_text or '').split())
@@ -2870,6 +2938,50 @@ def _assistant_reply_added_after_current_turn(result_messages, previous_context,
 
 
 _TOOL_RESULT_SNIPPET_MAX = 4000
+
+
+_LIVE_TOOL_PROMPT_DELTA_MAX = 12_000
+
+
+def _bounded_live_tool_prompt_delta(messages, *, cap: int = _LIVE_TOOL_PROMPT_DELTA_MAX) -> int:
+    """Return a bounded rough token delta for live tool metering.
+
+    Tool-result callbacks can fire before the agent's next exact prompt accounting
+    is available. The live usage ring should show a conservative in-flight hint,
+    not replay a full large tool payload into `last_prompt_tokens`.
+    """
+    if not messages:
+        return 0
+    try:
+        from agent.model_metadata import estimate_messages_tokens_rough
+        delta = int(estimate_messages_tokens_rough(messages) or 0)
+    except Exception:
+        delta = 0
+    if delta <= 0:
+        return 0
+    return min(delta, int(cap or 0))
+
+
+def live_usage_prompt_estimate_after_tool_delta(
+    *,
+    base_prompt_tokens: int,
+    exact_prompt_tokens: int = 0,
+    messages=None,
+    cap: int = _LIVE_TOOL_PROMPT_DELTA_MAX,
+) -> dict:
+    """Compute the live `last_prompt_tokens` estimate after a tool update.
+
+    Exact compressor/provider prompt accounting wins. When no newer exact prompt
+    is available, add only a bounded live tool delta to the persisted base.
+    """
+    base = int(base_prompt_tokens or 0)
+    exact = int(exact_prompt_tokens or 0)
+    if exact and exact != base:
+        return {'last_prompt_tokens': exact, 'estimated': False}
+    return {
+        'last_prompt_tokens': base + _bounded_live_tool_prompt_delta(messages, cap=cap),
+        'estimated': True,
+    }
 
 
 def _tool_result_snippet(raw, limit: int = _TOOL_RESULT_SNIPPET_MAX) -> str:
@@ -3403,11 +3515,7 @@ def _run_agent_streaming(
         """Increment a rough next-prompt estimate from live tool activity."""
         if not messages:
             return _live_prompt_estimate_tokens[0]
-        try:
-            from agent.model_metadata import estimate_messages_tokens_rough
-            _delta = int(estimate_messages_tokens_rough(messages) or 0)
-        except Exception:
-            _delta = 0
+        _delta = _bounded_live_tool_prompt_delta(messages)
         if _delta > 0:
             _seed_live_prompt_estimate()
             _live_prompt_estimate_tokens[0] += _delta
@@ -4666,7 +4774,7 @@ def _run_agent_streaming(
                     _previous_context_messages,
                     _result_messages,
                 )
-                _next_context_messages = _dedupe_replayed_active_context(
+                _next_context_messages = _dedupe_replayed_context_messages(
                     _previous_context_messages,
                     _next_context_messages,
                 )
@@ -4813,7 +4921,7 @@ def _run_agent_streaming(
                                     _previous_context_messages,
                                     _result_messages,
                                 )
-                                _next_context_messages = _dedupe_replayed_active_context(
+                                _next_context_messages = _dedupe_replayed_context_messages(
                                     _previous_context_messages,
                                     _next_context_messages,
                                 )
@@ -5639,7 +5747,7 @@ def _run_agent_streaming(
                                 _next_context_messages = _restore_reasoning_metadata(
                                     _previous_context_messages, _result_messages,
                                 )
-                                _next_context_messages = _dedupe_replayed_active_context(
+                                _next_context_messages = _dedupe_replayed_context_messages(
                                     _previous_context_messages,
                                     _next_context_messages,
                                 )

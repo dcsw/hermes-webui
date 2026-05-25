@@ -1,7 +1,7 @@
 """
-Hermes Web UI -- Optional password authentication.
-Off by default. Enable by setting HERMES_WEBUI_PASSWORD env var
-or configuring a password in the Settings panel.
+Hermes Web UI -- optional authentication.
+Off by default. Enable by setting HERMES_WEBUI_PASSWORD, configuring a
+password in Settings, or registering passkeys and then going passwordless.
 """
 import hashlib
 import hmac
@@ -49,6 +49,7 @@ def _resolve_session_ttl() -> int:
 PUBLIC_PATHS = frozenset({
     '/login', '/health', '/favicon.ico', '/sw.js',
     '/api/auth/login', '/api/auth/status',
+    '/api/auth/passkey/options', '/api/auth/passkey/login',
     '/manifest.json', '/manifest.webmanifest',
     '/session/manifest.json', '/session/manifest.webmanifest',
 })
@@ -290,9 +291,59 @@ def get_password_hash() -> str | None:
         return result
 
 
-def is_auth_enabled() -> bool:
+def is_password_auth_enabled() -> bool:
     """True if a password is configured (env var or settings)."""
     return get_password_hash() is not None
+
+
+def _passkey_feature_flag_enabled() -> bool:
+    """Return True if the passkey/WebAuthn surface is enabled for this deployment.
+
+    Passkey support is opt-in default-off behind a feature flag so deployments
+    that don't want the WebAuthn surface (or whose RP-ID setup isn't ready for
+    non-localhost hosts) can disable it entirely with no UI surface, no
+    endpoints, no credential storage. To enable:
+
+      - Set ``HERMES_WEBUI_PASSKEY=1`` in the environment, OR
+      - Set ``webui_passkey_enabled: true`` in the per-profile config.yaml
+
+    With the flag off, ``are_passkeys_enabled()`` always returns False even if
+    credentials were registered in the past, and ``/login`` shows password-only.
+    """
+    env_value = os.getenv("HERMES_WEBUI_PASSKEY", "")
+    if env_value:
+        return env_value.strip().lower() in {"1", "true", "yes", "on"}
+    try:
+        from api.config import get_config
+
+        cfg = get_config()
+        if isinstance(cfg, dict):
+            raw = cfg.get("webui_passkey_enabled")
+            if isinstance(raw, bool):
+                return raw
+            if isinstance(raw, str):
+                return raw.strip().lower() in {"1", "true", "yes", "on"}
+    except Exception:
+        pass
+    return False
+
+
+def are_passkeys_enabled() -> bool:
+    """True if the passkey feature flag is on AND at least one local passkey credential is registered."""
+    if not _passkey_feature_flag_enabled():
+        return False
+    try:
+        from api.passkeys import passkeys_available
+
+        return passkeys_available()
+    except Exception as exc:
+        logger.debug("Failed to inspect passkey availability: %s", exc)
+        return False
+
+
+def is_auth_enabled() -> bool:
+    """True if password auth or passkey-only auth is configured."""
+    return is_password_auth_enabled() or are_passkeys_enabled()
 
 
 def verify_password(plain: str) -> bool:

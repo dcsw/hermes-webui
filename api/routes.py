@@ -23,7 +23,7 @@ import uuid
 import re
 from pathlib import Path
 from contextlib import closing
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlsplit
 from api.agent_sessions import (
     MESSAGING_SOURCES,
     is_cli_session_row,
@@ -75,6 +75,21 @@ _CSP_REPORT_RATE_LIMIT_LOCK = threading.Lock()
 _CSP_REPORT_RATE_LIMIT_WINDOW_SECONDS = 60
 _CSP_REPORT_RATE_LIMIT_MAX = 100
 _CSP_REPORT_MAX_BODY_BYTES = 64 * 1024
+_CLIENT_EVENT_LOGGER = logging.getLogger("client_event")
+_CLIENT_EVENT_RATE_LIMIT: dict[str, list[float]] = {}
+_CLIENT_EVENT_RATE_LIMIT_LOCK = threading.Lock()
+_CLIENT_EVENT_RATE_LIMIT_WINDOW_SECONDS = 60
+_CLIENT_EVENT_RATE_LIMIT_MAX = 30
+_CLIENT_EVENT_MAX_BODY_BYTES = 4 * 1024
+_CLIENT_EVENT_ALLOWED_FIELDS = {
+    "event": 64,
+    "source": 80,
+    "session_id": 128,
+    "stream_id": 128,
+    "visibility_state": 32,
+    "url_path": 256,
+    "reason": 160,
+}
 
 
 def _session_field(session, field, default=None):
@@ -1126,7 +1141,7 @@ def _run_journal_status_payload(summary: dict, *, active: bool = False) -> dict:
     terminal = bool(summary.get("terminal"))
     terminal_state = summary.get("terminal_state")
     if not active and not terminal:
-        terminal_state = "stale-from-restart"
+        terminal_state = "lost-worker-bookkeeping"
     return {
         "session_id": summary.get("session_id"),
         "run_id": summary.get("run_id"),
@@ -1263,7 +1278,12 @@ def _is_browser_unsafe_request(handler) -> bool:
 
 def _csrf_exempt_path(path: str) -> bool:
     """Paths that cannot or must not carry a session CSRF token."""
-    return path in {"/api/auth/login", "/api/csp-report"}
+    return path in {
+        "/api/auth/login",
+        "/api/auth/passkey/options",
+        "/api/auth/passkey/login",
+        "/api/csp-report",
+    }
 
 
 _CSRF_FAILURE_ATTR = "_hermes_csrf_failure_reason"
@@ -1371,6 +1391,20 @@ def _csp_report_rate_limited(handler, *, now: float | None = None) -> bool:
     return False
 
 
+def _client_event_rate_limited(handler, *, now: float | None = None) -> bool:
+    now = time.time() if now is None else now
+    key = _client_ip_for_rate_limit(handler)
+    cutoff = now - _CLIENT_EVENT_RATE_LIMIT_WINDOW_SECONDS
+    with _CLIENT_EVENT_RATE_LIMIT_LOCK:
+        timestamps = [ts for ts in _CLIENT_EVENT_RATE_LIMIT.get(key, []) if ts >= cutoff]
+        if len(timestamps) >= _CLIENT_EVENT_RATE_LIMIT_MAX:
+            _CLIENT_EVENT_RATE_LIMIT[key] = timestamps
+            return True
+        timestamps.append(now)
+        _CLIENT_EVENT_RATE_LIMIT[key] = timestamps
+    return False
+
+
 def _send_no_content(handler, status: int = 204) -> bool:
     handler.send_response(status)
     handler.send_header("Content-Length", "0")
@@ -1408,6 +1442,105 @@ def _handle_csp_report(handler) -> bool:
     payload = _read_csp_report_payload(handler)
     _CSP_REPORT_LOGGER.info("CSP report from %s: %s", _client_ip_for_rate_limit(handler), payload)
     return _send_no_content(handler)
+
+
+def _bounded_client_event_string(value, limit: int) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    return text[:limit]
+
+
+def _sanitize_client_event_url_path(value) -> str | None:
+    text = _bounded_client_event_string(value, 1024)
+    if not text:
+        return None
+    try:
+        parsed = urlsplit(text)
+        path = parsed.path or "/"
+    except Exception:
+        path = text.split("?", 1)[0] or "/"
+    if not path.startswith("/"):
+        path = "/" + path.lstrip("/")
+    return path[: _CLIENT_EVENT_ALLOWED_FIELDS["url_path"]]
+
+
+def _sanitize_client_event_payload(payload: dict | None) -> dict:
+    """Whitelist tiny browser diagnostic events and discard sensitive content.
+
+    Client-side SSE diagnostics should explain transport failures without
+    persisting prompts, cookies, query strings, headers, or arbitrary browser
+    payloads. This helper intentionally keeps only bounded scalar metadata.
+    """
+    if not isinstance(payload, dict):
+        return {"event": "unknown"}
+    sanitized: dict[str, object] = {}
+    for field, limit in _CLIENT_EVENT_ALLOWED_FIELDS.items():
+        if field == "url_path":
+            value = _sanitize_client_event_url_path(payload.get(field))
+        else:
+            value = _bounded_client_event_string(payload.get(field), limit)
+        if value is not None:
+            sanitized[field] = value
+    ready_state = payload.get("ready_state")
+    if isinstance(ready_state, bool):
+        pass
+    elif isinstance(ready_state, int) and 0 <= ready_state <= 3:
+        sanitized["ready_state"] = ready_state
+    online = payload.get("online")
+    if isinstance(online, bool):
+        sanitized["online"] = online
+    elif isinstance(online, str):
+        lowered = online.strip().lower()
+        if lowered in {"true", "1", "yes", "on"}:
+            sanitized["online"] = True
+        elif lowered in {"false", "0", "no", "off"}:
+            sanitized["online"] = False
+    if "event" not in sanitized:
+        sanitized["event"] = "unknown"
+    return sanitized
+
+
+def _read_client_event_payload(handler) -> dict:
+    try:
+        length = int(handler.headers.get("Content-Length", 0))
+    except Exception:
+        length = 0
+    if length > _CLIENT_EVENT_MAX_BODY_BYTES:
+        try:
+            handler.rfile.read(_CLIENT_EVENT_MAX_BODY_BYTES)
+        except Exception:
+            pass
+        # Do not leave unread request-body bytes on an HTTP/1.1 keep-alive
+        # socket. Draining an arbitrary oversized body can tie up a worker;
+        # closing the connection after the bounded read preserves framing for
+        # the next request without turning diagnostics into a slow-drain sink.
+        try:
+            handler.close_connection = True
+        except Exception:
+            pass
+        return {"event": "discarded", "reason": "body_too_large"}
+    raw = handler.rfile.read(length) if length else b"{}"
+    try:
+        decoded = raw.decode("utf-8")
+        payload = json.loads(decoded)
+    except Exception:
+        return {"event": "invalid", "reason": "invalid_json"}
+    return payload if isinstance(payload, dict) else {"event": "invalid", "reason": "not_object"}
+
+
+def _handle_client_event_log(handler, body: dict) -> bool:
+    if _client_event_rate_limited(handler):
+        _CLIENT_EVENT_LOGGER.warning(
+            "Dropped client event from %s: rate limit exceeded",
+            _client_ip_for_rate_limit(handler),
+        )
+        return j(handler, {"ok": False, "error": "rate_limited"}, status=429) or True
+    payload = _sanitize_client_event_payload(body)
+    _CLIENT_EVENT_LOGGER.info("Client event from %s: %s", _client_ip_for_rate_limit(handler), payload)
+    return j(handler, {"ok": True, "event": payload.get("event")}) or True
 
 
 def _normalize_provider_id(value: str | None) -> str:
@@ -2664,6 +2797,7 @@ button{width:100%;padding:10px;border-radius:10px;border:none;background:rgba(12
   border:1px solid rgba(124,185,255,.3);color:#7cb9ff;font-size:14px;font-weight:600;cursor:pointer;
   transition:all .15s}
 button:hover{background:rgba(124,185,255,.25)}
+.passkey-login{margin-top:10px;background:rgba(255,255,255,.04);border-color:rgba(232,160,48,.35);color:#e8a030}
 .err{color:#e94560;font-size:12px;margin-top:10px;display:none}
 </style></head><body>
 <div class="card">
@@ -2673,6 +2807,7 @@ button:hover{background:rgba(124,185,255,.25)}
   <form id="login-form" data-invalid-pw="{{LOGIN_INVALID_PW}}" data-conn-failed="{{LOGIN_CONN_FAILED}}">
     <input type="password" id="pw" placeholder="{{LOGIN_PLACEHOLDER}}" autofocus>
     <button type="submit">{{LOGIN_BTN}}</button>
+    <button type="button" id="passkey-login" class="passkey-login" style="display:none">Sign in with passkey</button>
   </form>
   <div class="err" id="err"></div>
 </div>
@@ -3500,6 +3635,21 @@ def _serve_shell_unavailable(handler, exc: Exception) -> bool:
     return True
 
 
+def _handle_shutdown(handler) -> bool:
+    """Shut down the WebUI server process."""
+    j(handler, {"status": "shutting_down"})
+    import signal
+    import threading
+
+    def _do_shutdown():
+        import time
+        time.sleep(0.3)
+        os.kill(os.getpid(), signal.SIGINT)
+
+    threading.Thread(target=_do_shutdown, daemon=True).start()
+    return True
+
+
 def _serve_manifest(handler) -> bool:
     """Serve static/manifest.json with the correct PWA Content-Type.
 
@@ -3602,13 +3752,26 @@ def handle_get(handler, parsed) -> bool:
         return t(handler, _page, content_type="text/html; charset=utf-8")
 
     if parsed.path == "/api/auth/status":
-        from api.auth import is_auth_enabled, parse_cookie, verify_session
+        from api.auth import _passkey_feature_flag_enabled, get_password_hash, is_auth_enabled, parse_cookie, verify_session
+        from api.passkeys import registered_credentials
 
         logged_in = False
-        if is_auth_enabled():
+        auth_enabled = is_auth_enabled()
+        if auth_enabled:
             cv = parse_cookie(handler)
             logged_in = bool(cv and verify_session(cv))
-        return j(handler, {"auth_enabled": is_auth_enabled(), "logged_in": logged_in})
+        passkey_flag = _passkey_feature_flag_enabled()
+        passkeys = registered_credentials() if passkey_flag else []
+        password_auth_enabled = get_password_hash() is not None
+        return j(handler, {
+            "auth_enabled": auth_enabled,
+            "logged_in": logged_in,
+            "password_auth_enabled": password_auth_enabled,
+            "passwordless_enabled": bool(passkeys) and not password_auth_enabled,
+            "passkeys_enabled": bool(passkeys),
+            "passkeys_count": len(passkeys),
+            "passkey_feature_flag": passkey_flag,
+        })
 
     if parsed.path in ("/manifest.json", "/manifest.webmanifest"):
         return _serve_manifest(handler)
@@ -4700,6 +4863,9 @@ def handle_post(handler, parsed) -> bool:
             if diag:
                 diag.finish()
 
+    if parsed.path == "/api/shutdown":
+        return _handle_shutdown(handler)
+
     if parsed.path == "/api/upload":
         return handle_upload(handler)
     if parsed.path == "/api/upload/extract":
@@ -4707,6 +4873,11 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/transcribe":
         return handle_transcribe(handler)
+
+    if parsed.path == "/api/client-events/log":
+        if diag:
+            diag.stage("read_client_event_body")
+        return _handle_client_event_log(handler, _read_client_event_payload(handler))
 
     if diag:
         diag.stage("read_body")
@@ -5709,7 +5880,10 @@ def handle_post(handler, parsed) -> bool:
             isinstance(body.get("_set_password"), str)
             and body.get("_set_password", "").strip()
         )
-        requested_clear_password = bool(body.get("_clear_password"))
+        requested_passwordless = bool(body.pop("_passwordless", False))
+        requested_clear_password = bool(body.get("_clear_password") or requested_passwordless)
+        if requested_passwordless:
+            body["_clear_password"] = True
 
         # #1560: HERMES_WEBUI_PASSWORD env var takes precedence in
         # api.auth.get_password_hash(), so writing password_hash to settings.json
@@ -5724,6 +5898,18 @@ def handle_post(handler, parsed) -> bool:
                     "Unset the env var and restart the server before changing the password here.",
                     409,
                 )
+        if requested_passwordless:
+            from api.auth import _passkey_feature_flag_enabled
+            from api.passkeys import registered_credentials
+
+            if not _passkey_feature_flag_enabled():
+                return bad(handler, "Passkey support is disabled. Enable HERMES_WEBUI_PASSKEY before going passwordless.", 409)
+            if not registered_credentials():
+                return bad(handler, "Register a passkey before going passwordless.", 409)
+        elif requested_clear_password:
+            from api.passkeys import clear_credentials
+
+            clear_credentials()
 
         saved = save_settings(body)
         saved.pop("password_hash", None)  # never expose hash to client
@@ -6257,6 +6443,90 @@ def handle_post(handler, parsed) -> bool:
         handler.end_headers()
         handler.wfile.write(body)
         return True
+
+    if parsed.path == "/api/auth/passkey/options":
+        from api.auth import _passkey_feature_flag_enabled, is_auth_enabled
+        from api.passkeys import PasskeyError, authentication_options
+
+        if not _passkey_feature_flag_enabled():
+            return j(handler, {"error": "Passkey support is disabled. Set HERMES_WEBUI_PASSKEY=1 or webui_passkey_enabled: true to enable."}, status=404)
+        if not is_auth_enabled():
+            return j(handler, {"error": "Auth not enabled"}, status=400)
+        try:
+            return j(handler, {"ok": True, "publicKey": authentication_options(handler)})
+        except PasskeyError as e:
+            return bad(handler, str(e), status=400)
+
+    if parsed.path == "/api/auth/passkey/login":
+        from api.auth import _passkey_feature_flag_enabled, create_session, is_auth_enabled, set_auth_cookie
+        from api.auth import _check_login_rate, _record_login_attempt
+        from api.passkeys import PasskeyError, finish_login
+
+        if not _passkey_feature_flag_enabled():
+            return j(handler, {"error": "Passkey support is disabled."}, status=404)
+        if not is_auth_enabled():
+            return j(handler, {"error": "Auth not enabled"}, status=400)
+        client_ip = handler.client_address[0]
+        if not _check_login_rate(client_ip):
+            return j(handler, {"error": "Too many attempts. Try again in a minute."}, status=429)
+        try:
+            finish_login(body, handler)
+        except PasskeyError as e:
+            _record_login_attempt(client_ip)
+            return bad(handler, str(e), status=401)
+        cookie_val = create_session()
+        handler.send_response(200)
+        handler.send_header("Content-Type", "application/json")
+        handler.send_header("Cache-Control", "no-store")
+        _security_headers(handler)
+        set_auth_cookie(handler, cookie_val)
+        handler.end_headers()
+        handler.wfile.write(json.dumps({"ok": True}).encode())
+        return True
+
+    if parsed.path == "/api/auth/passkey/register/options":
+        from api.auth import _passkey_feature_flag_enabled
+        from api.passkeys import registration_options
+
+        if not _passkey_feature_flag_enabled():
+            return j(handler, {"error": "Passkey support is disabled."}, status=404)
+        return j(handler, {"ok": True, "publicKey": registration_options(handler)})
+
+    if parsed.path == "/api/auth/passkey/register":
+        from api.auth import _passkey_feature_flag_enabled
+        from api.passkeys import PasskeyError, finish_registration, registered_credentials
+
+        if not _passkey_feature_flag_enabled():
+            return j(handler, {"error": "Passkey support is disabled."}, status=404)
+        try:
+            result = finish_registration(body, handler)
+            result["credentials"] = registered_credentials()
+            return j(handler, result)
+        except PasskeyError as e:
+            return bad(handler, str(e), status=400)
+
+    if parsed.path == "/api/auth/passkey/delete":
+        from api.auth import _passkey_feature_flag_enabled, get_password_hash
+        from api.passkeys import PasskeyError, delete_credential, registered_credentials
+
+        if not _passkey_feature_flag_enabled():
+            return j(handler, {"error": "Passkey support is disabled."}, status=404)
+        try:
+            credential_id = str(body.get("id") or "")
+            creds = registered_credentials()
+            if get_password_hash() is None and len(creds) <= 1 and any(c.get("id") == credential_id for c in creds):
+                return bad(handler, "Set a password or disable auth before removing the last passkey.", 409)
+            return j(handler, delete_credential(credential_id))
+        except PasskeyError as e:
+            return bad(handler, str(e), status=404)
+
+    if parsed.path == "/api/auth/passkeys":
+        from api.auth import _passkey_feature_flag_enabled
+        from api.passkeys import registered_credentials
+
+        if not _passkey_feature_flag_enabled():
+            return j(handler, {"credentials": [], "disabled": True})
+        return j(handler, {"credentials": registered_credentials()})
 
     if parsed.path == "/api/auth/logout":
         from api.auth import clear_auth_cookie, invalidate_session, parse_cookie
@@ -8946,6 +9216,7 @@ def _handle_chat_sync(handler, body):
                 session_id=s.session_id,
             )
             from api.streaming import (
+                _dedupe_replayed_context_messages,
                 _merge_display_messages_after_agent_result,
                 _restore_display_reasoning_metadata,
                 _restore_reasoning_metadata,
@@ -8995,6 +9266,10 @@ def _handle_chat_sync(handler, body):
         _next_context_messages = _restore_reasoning_metadata(
             _previous_context_messages,
             _result_messages,
+        )
+        _next_context_messages = _dedupe_replayed_context_messages(
+            _previous_context_messages,
+            _next_context_messages,
         )
         s.context_messages = _next_context_messages
         s.messages = _merge_display_messages_after_agent_result(

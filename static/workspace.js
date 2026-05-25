@@ -85,6 +85,23 @@ async function api(path,opts={}){
   throw lastErr;
 }
 
+function recordClientSSEError(source, details={}){
+  try{
+    const payload={
+      event:'sse_error',
+      source:String(source||'unknown'),
+      ready_state:details.ready_state,
+      session_id:details.session_id||null,
+      stream_id:details.stream_id||null,
+      visibility_state:(typeof document!=='undefined'&&document.visibilityState)||'unknown',
+      online:(typeof navigator!=='undefined'&&typeof navigator.onLine==='boolean')?navigator.onLine:null,
+      url_path:(typeof location!=='undefined'&&location.pathname)||'/',
+      reason:details.reason||'EventSource.onerror',
+    };
+    void api('/api/client-events/log',{method:'POST',body:JSON.stringify(payload),timeoutMs:3000}).catch(()=>{});
+  }catch(_){}
+}
+
 // Persist/restore expanded directory state per workspace in localStorage
 function _wsExpandKey(){
   const ws=S.session&&S.session.workspace;
