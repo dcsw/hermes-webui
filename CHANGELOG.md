@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- The chat composer now treats the numeric keypad Enter key as a submit shortcut even when the send-key preference is set to Ctrl/Cmd+Enter, while preserving regular Enter-as-newline behavior in that mode.
+
 ## [v0.51.157] — 2026-05-28 — Release EC (stage-batch39 — 5-PR mixed-risk cleanup: gateway prefill forward + prefill budget + compressed-continuation sidebar + browser-transcript memory guidance + reasoning max parity)
 
 ### Added
