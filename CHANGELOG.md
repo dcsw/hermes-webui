@@ -3,6 +3,12 @@
 
 ## [Unreleased]
 
+## [v0.51.199] — 2026-06-01 — Release FS (stage-batch11 — pinned-scroll recovery + inline-math currency false-positive)
+
+### Fixed
+- Pinned chat now recovers its scroll position after a DOM rebuild: `_setMessageScrollToBottom` retries on the next layout frame, and `scrollIfPinned` re-pins when the pane has drifted more than 500px from the bottom, so a message-list rebuild no longer leaves a pinned conversation stranded mid-scroll. Closes #3319 (#3330, @jianongHe).
+- The `$...$` inline-math renderer no longer treats currency like `$1,000 xuống ~$95` as math: the opening `$` followed by a digit is now rejected (aligning with smd's `se()` guard), so dollar amounts render as plain text. Digit-leading inline math (e.g. `$2x = 4$`) should now use the LaTeX-style `\(2x = 4\)` or display `$$2x = 4$$` delimiters (#3311, @toanalien).
+
 ## [v0.51.198] — 2026-06-01 — Release FR (stage-batch10 — custom-provider reasoning model-id normalize + profile skill counts + run-adapter RFC slice)
 
 ### Fixed
