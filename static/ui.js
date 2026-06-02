@@ -2930,9 +2930,12 @@ function getModelLabel(modelId){
       if (!_lastUsable) _lastUsable = _seg;
       if (!_isVersionTail(_seg)) { _pick = _seg; break; }
     }
-    // Fallbacks: last non-placeholder path segment, else the literal last path
-    // segment, else the authority, else the raw id. Never an env-var placeholder.
-    _last = _pick || _lastUsable || _path[_path.length - 1] || _all[0] || modelId;
+    // Fallbacks: the chosen non-version segment, else the last non-placeholder
+    // path segment. NEVER the authority and NEVER a `${...}` placeholder — for
+    // a degenerate id (`gpt://folder123`, `gpt://folder123/${MODEL}`) fall all
+    // the way back to the raw id rather than leak the folder/host or env var.
+    const _lastPath = _path[_path.length - 1] || '';
+    _last = _pick || _lastUsable || (_lastPath && !_isPlaceholder(_lastPath) ? _lastPath : '') || modelId;
   } else {
     _last = modelId.includes('/') ? (modelId.slice(modelId.indexOf('/')+1) || modelId) : modelId;
   }

@@ -88,6 +88,20 @@ def test_uri_label_edge_cases_never_return_authority_or_drop_digit_models():
         assert label != "folder123", "authority/folder leaked into label"
 
 
+def test_uri_degenerate_ids_fall_back_to_raw_not_authority_or_placeholder():
+    """#3429 follow-up 2 (Codex gate): a URI with no usable model segment must
+    fall back to the raw id — never the authority/folder, never a ${...} env-var."""
+    out = _labels([
+        "gpt://folder123",              # authority only, no path
+        "gpt://folder123/${MODEL}",     # path is only an env-var placeholder
+    ])
+    assert out["gpt://folder123"] == "gpt://folder123"
+    assert out["gpt://folder123/${MODEL}"] == "gpt://folder123/${MODEL}"
+    for label in out.values():
+        assert label != "folder123", "authority leaked into label"
+        assert label not in ("${MODEL}",), "env-var placeholder leaked into label"
+
+
 def test_uri_fix_does_not_regress_multi_slash_or_bare_ids():
     """#3360 multi-slash hierarchy + single-slash/bare ids stay correct."""
     out = _labels([
