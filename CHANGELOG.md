@@ -3,9 +3,12 @@
 
 ## [Unreleased]
 
+## [v0.51.205] — 2026-06-01 — Release FY (stage-hi1 — workspace syntax highlighting + generated-image cards + manual title regeneration)
+
 ### Added
+- Workspace file previews now render with syntax highlighting via Prism.js (already loaded for chat code blocks), covering common languages (Python, JS/TS, CSS, JSON, SQL, shell, and more) and degrading gracefully to plain text for unknown/plain files and when offline. The preview code surface uses a single uniform background across light and dark themes (#3337, @mysoul12138).
 - Generated local image artifacts now render as a clean inline image (with click-to-zoom lightbox) plus a hover/focus-revealed **Download** action overlaid on the image, served through authenticated `/api/media` URLs — matching the common AI-chat pattern of letting the image be the hero rather than wrapping it in a permanent card (#3220, @AJV20).
-- The session action menu can regenerate conversation titles on demand from the saved transcript, updating the sidebar without touching conversation chronology and syncing the new title through to state.db when Insights sync is enabled. Closes #3106 (#3223, @AJV20).
+- The session action menu can regenerate conversation titles on demand from the saved transcript, updating the sidebar without touching conversation chronology and syncing the new title through to state.db when Insights sync is enabled. The menu was also streamlined to a compact icon + label layout (descriptions move to hover tooltips). Closes #3106 (#3223, @AJV20).
 
 ## [v0.51.204] — 2026-06-01 — Release FX (stage-batch17 — project/session operations honor the session's own profile)
 
