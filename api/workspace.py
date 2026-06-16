@@ -81,6 +81,13 @@ def _expanduser_path(path: str | Path) -> Path:
             return Path(home)
         if raw.startswith('~/') or raw.startswith('~\\'):
             return Path(home) / raw[2:]
+        # NOTE: ``~user`` / ``~root`` forms are intentionally NOT expanded here.
+        # Master deliberately does not block ``/root`` (#510/#521 — Hermes commonly
+        # runs as root, where ``/root`` is the legitimate home and is allowed via
+        # the home carve-out). Expanding ``~root`` -> ``/root`` for a NON-root
+        # deployment would let it register root's home; leaving the literal form
+        # (resolved relative to cwd, then rejected if it escapes) is the safer
+        # behavior and matches the current security model.
     return Path(raw)
 
 
@@ -98,6 +105,11 @@ def _as_posix_path(path: str | Path | None) -> PurePosixPath | None:
     if path in (None, ""):
         return None
     raw = _strip_surrounding_quotes(str(path)).strip().replace('\\', '/')
+    # Reject embedded null bytes here rather than letting them survive normpath
+    # and crash later at .resolve() with an uncaught ValueError (surfaces as a
+    # 500). Fail-closed: treat as an invalid path.
+    if '\x00' in raw:
+        return None
     if not raw.startswith('/'):
         return None
     return PurePosixPath(posixpath.normpath(raw))
@@ -273,6 +285,11 @@ def _workspace_access_error(candidate: Path, *, missing_label: str = "Path does 
         st = candidate.stat()
     except FileNotFoundError:
         return f"{missing_label}: {candidate}"
+    except ValueError as exc:
+        # Embedded null byte (or similar invalid path) — .stat() raises ValueError,
+        # not OSError. Report as an access error rather than letting it surface as
+        # an uncaught 500.
+        return f"Cannot access path: {candidate!r}. Invalid path ({exc})."
     except PermissionError as exc:
         return (
             f"Cannot access path: {candidate}. The server process could not inspect "
@@ -396,7 +413,10 @@ def _safe_resolve(p: Path) -> Path:
     """Path.resolve() that never raises — falls back to the input path on error."""
     try:
         return p.resolve()
-    except (OSError, RuntimeError):
+    except (OSError, RuntimeError, ValueError):
+        # ValueError covers embedded-null-byte paths, which .resolve() raises on
+        # — fail-closed to the raw path so the downstream block-list gate rejects
+        # it cleanly instead of surfacing a 500.
         return p
 
 

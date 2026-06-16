@@ -4829,6 +4829,8 @@ from api.workspace import (
     make_anchored_dir,
     validate_workspace_to_add,
     _is_blocked_system_path,
+    _home_path,
+    _is_within,
     _strip_surrounding_quotes,
     _is_remote_terminal_backend,
     _workspace_blocked_roots,
@@ -15522,9 +15524,23 @@ def _handle_workspace_add(handler, body):
     # _is_blocked_system_path honours user-tmp carve-outs (e.g. /var/folders on
     # macOS) so pytest's tmp_path_factory paths and other legit user-tmp dirs
     # still register cleanly.
-    candidate = Path(path_str).expanduser().resolve()
+    try:
+        candidate = Path(path_str).expanduser().resolve()
+    except (ValueError, OSError, RuntimeError) as e:
+        # Invalid path (e.g. embedded null byte) — fail closed with a clean 400
+        # instead of letting .resolve() raise an uncaught 500.
+        return bad(handler, f"Invalid path: {_sanitize_error(e)}")
     if _is_blocked_system_path(candidate):
-        return bad(handler, f"Path points to a system directory: {candidate}")
+        # Home-directory carve-out, mirroring the validators
+        # (resolve_trusted_workspace / validate_workspace_to_add): a workspace
+        # at or under the active user's home must stay allowed even when that
+        # home lives under an otherwise-blocked root (e.g. systemd-homed
+        # /var/home/<user>/...). Without this the route rejects valid
+        # /var/home workspaces before validate_workspace_to_add()'s carve-out
+        # can run.
+        _home = _home_path()
+        if not (_home != Path("/") and (candidate == _home or _is_within(candidate, _home))):
+            return bad(handler, f"Path points to a system directory: {candidate}")
     # Now safe to create the directory if requested
     if auto_create:
         try:
