@@ -3,6 +3,12 @@
 
 ## [Unreleased]
 
+## [v0.51.481] — 2026-06-17 — Release QP (gateway start/stop/restart controls in Settings)
+
+### Added
+
+- **Settings → System now has start / stop / restart controls for the messaging gateway (#3628).** Manage the Hermes gateway (Telegram, Discord, Slack, etc.) from the WebUI without dropping to a terminal. The controls call the existing platform-aware `hermes gateway {start,stop,restart}` CLI (systemd on Linux, launchd on macOS), refresh the gateway status card, and surface bounded errors. The endpoint is auth + CSRF gated, validates the active profile name, runs a list-argv subprocess (no shell), and is serialized server-side so overlapping actions return 409 rather than spawning concurrent gateway processes. Thanks @rodboev.
+
 ## [v0.51.480] — 2026-06-17 — Release QO (inline PDF preview renders all pages)
 
 ### Fixed
