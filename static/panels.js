@@ -8213,12 +8213,22 @@ async function checkUpdatesNow(){
       const agentPart=formatUpdatePart('Agent',data.agent);
       if(webuiPart) parts.push(webuiPart);
       if(agentPart) parts.push(agentPart);
+      // Track non-git targets separately so a mixed deployment (one git
+      // checkout + one no-git install) never hides the "can't check" state
+      // behind an up-to-date summary (#4356).
+      const noGitParts=[];
+      if(data.webui&&data.webui.no_git) noGitParts.push('WebUI');
+      if(data.agent&&data.agent.no_git&&!data.agent.ignored) noGitParts.push('Agent');
       if(parts.length){
-        if(status){status.textContent=t('settings_updates_available').replace('{count}',parts.join(', '));status.style.color='var(--accent)';}
+        let txt=t('settings_updates_available').replace('{count}',parts.join(', '));
+        if(noGitParts.length) txt+=' · '+t('settings_update_no_git');
+        if(status){status.textContent=txt;status.style.color='var(--accent)';}
         // Also trigger the update banner
         if(typeof _showUpdateBanner==='function') _showUpdateBanner(data);
       } else if(errorParts.length){
         if(status){status.textContent=t('settings_update_check_failed')+': '+errorParts.join(', ');status.style.color='var(--error)';}
+      } else if(noGitParts.length){
+        if(status){status.textContent=t('settings_update_no_git');status.style.color='var(--muted)';}
       } else {
         if(status){status.textContent=t('settings_up_to_date');status.style.color='var(--success)';}
         if(typeof _showUpdateBanner==='function') _showUpdateBanner(data);

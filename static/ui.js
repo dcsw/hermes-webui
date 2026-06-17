@@ -1531,14 +1531,28 @@ function _reconcileModelDropdownSelection(sel,data,previousState,opts){
   // rebuild should preserve the loaded session model or the user's current
   // in-page selection when it still exists in the refreshed catalog.
   const shouldApplyBootDefault=!!(opts&&opts.preferProfileDefaultOnFreshBoot);
+
+  // Helper: apply the requested model, but if it is missing from the current
+  // catalog (cross-provider selection after a partial/timed-out rebuild), inject
+  // it as a custom option instead of returning null and letting the browser
+  // silently snap to the first <option>. _ensureModelOptionInDropdown already
+  // tries _applyModelToDropdown first, so delegate to it (single scan) and keep
+  // the plain-apply fallback for the unlikely case it is unavailable.
+  const _applyOrEnsure = function(modelId, providerId) {
+    if (typeof _ensureModelOptionInDropdown === 'function') {
+      return _ensureModelOptionInDropdown(modelId, sel, providerId);
+    }
+    return _applyModelToDropdown(modelId, sel, providerId);
+  };
+
   if(shouldApplyBootDefault && data&&data.default_model && !(activeSession&&activeSession.model)){
-    return _applyModelToDropdown(data.default_model,sel,data.active_provider||null);
+    return _applyOrEnsure(data.default_model, data.active_provider||null);
   }
   if(activeSession&&activeSession.model){
-    return _applyModelToDropdown(activeSession.model,sel,activeSession.model_provider||null);
+    return _applyOrEnsure(activeSession.model, activeSession.model_provider||null);
   }
   if(previousState&&previousState.model){
-    return _applyModelToDropdown(previousState.model,sel,previousState.model_provider||null);
+    return _applyOrEnsure(previousState.model, previousState.model_provider||null);
   }
   return null;
 }
@@ -6648,7 +6662,7 @@ async function refreshSession() {
 }
 // ── Update banner ──
 function _formatUpdateTargetStatus(label,info){
-  if(!info||!(info.behind>0)) return null;
+  if(!info||info.no_git||!(info.behind>0)) return null;
   const release=(info.release_based&&info.latest_version)
     ?` (${info.current_version||'unknown'} -> ${info.latest_version})`
     :(info.branch?` (${info.branch})`:'');
