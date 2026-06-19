@@ -233,6 +233,49 @@ def test_wiki_symlink_to_hidden_same_section_target_blocked(monkeypatch, tmp_pat
     assert b"hidden_marker_q" not in h_page.body, "hidden secret leaked via symlink"
 
 
+def test_wiki_page_cached_nested_entry_rechecks_resolved_containment(monkeypatch, tmp_path):
+    import os as _os
+    from api import routes
+
+    wiki_root = tmp_path / "wiki"
+    section = wiki_root / "concepts"
+    nested = section / "sub"
+    nested.mkdir(parents=True)
+    page = nested / "real.md"
+    page.write_text("# real\n", encoding="utf-8")
+    secret = wiki_root / ".env"
+    secret.write_text("DONOTLEAK=stale_cache_marker\n", encoding="utf-8")
+
+    try:
+        page.unlink()
+        page.symlink_to(_os.path.join("..", "..", ".env"))
+    except (OSError, NotImplementedError):
+        import pytest
+        pytest.skip("symlinks not supported on this platform")
+
+    routes._llm_wiki_clear_page_files_cache()
+    monkeypatch.setattr(routes, "_WIKI_ALLOWLIST_TTL", 60.0)
+    monkeypatch.setattr(routes, "_llm_wiki_resolve_path", lambda: (wiki_root, None, None))
+
+    # Prime the cached name list while the nested page is still valid, then
+    # swap only the nested entry so the top-level section signature stays stale.
+    page.unlink()
+    page.write_text("# real\n", encoding="utf-8")
+    assert routes._llm_wiki_page_files(wiki_root) == [page]
+    sig_before = routes._llm_wiki_page_files_cache_signature(wiki_root.resolve())
+
+    page.unlink()
+    page.symlink_to(_os.path.join("..", "..", ".env"))
+    sig_after = routes._llm_wiki_page_files_cache_signature(wiki_root.resolve())
+    assert sig_after == sig_before
+
+    handler = _FakeHandler()
+    routes.handle_get(handler, urlparse("http://example.com/api/wiki/page?path=concepts/sub/real.md"))
+
+    assert handler.status == 404, f"stale cached nested symlink swap must 404, got {handler.status}"
+    assert b"stale_cache_marker" not in handler.body, "stale cached nested symlink leaked secret content"
+
+
 def test_wiki_symlinked_section_cannot_expose_outside_tree(monkeypatch, tmp_path):
     """A symlinked SECTION dir (concepts -> /tmp/outside) must not expose files
     outside the real wiki root."""

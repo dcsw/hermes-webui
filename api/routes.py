@@ -7365,6 +7365,10 @@ def handle_get(handler, parsed) -> bool:
         full_path = Path(os.path.join(wiki_root, page_path))
         if not _skill_path_within(Path(wiki_root), full_path):
             return bad(handler, "Invalid path", status=400)
+        try:
+            wiki_real = Path(wiki_root).resolve()
+        except OSError:
+            return bad(handler, "Page not found", status=404)
         # Only serve files the browse/list path would surface (same allowlist:
         # *.md under the wiki page-dirs, no dotfiles, forbidden-roots guard).
         # Without this the read endpoint could return ANY file inside the wiki
@@ -7380,9 +7384,12 @@ def handle_get(handler, parsed) -> bool:
             for _p in _llm_wiki_page_files(Path(wiki_root)):
                 try:
                     rp = _p.resolve()
+                    rel = rp.relative_to(wiki_real)
+                    if any(part.startswith(".") for part in rel.parts):
+                        continue
                     st0 = rp.stat()
                     allowed_identity[rp] = (st0.st_dev, st0.st_ino)
-                except OSError:
+                except (OSError, ValueError):
                     continue
         except Exception:
             allowed_identity = {}
