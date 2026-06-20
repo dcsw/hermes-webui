@@ -826,8 +826,13 @@ def test_session_reload_can_render_runtime_journal_anchor_scene_snapshot():
     assert "hasAnchorActivityScene" in helper
     assert "window._renderLiveAnchorActivitySceneSnapshotForStream" in renderer
     assert "scene.version!=='activity_scene_v1'" in ui_export
-    assert "window._renderLiveAnchorActivitySceneSnapshotForStream=function(streamId, scene, sessionId, opts)" in ui_export
-    assert "return _renderLiveAnchorActivitySceneSnapshotForStream(streamId, scene, sessionId, opts);" in ui_export
+    # The export MUST be a direct assignment of the top-level function, NOT a
+    # same-name wrapper (window.X = function(){ return X() }) — in a classic
+    # script the wrapper reassigns the global to itself → infinite recursion
+    # (#2715/#2771 brick class). Assert the direct-assignment form and that the
+    # recursive wrapper form is absent.
+    assert "window._renderLiveAnchorActivitySceneSnapshotForStream=_renderLiveAnchorActivitySceneSnapshotForStream" in ui_export
+    assert "window._renderLiveAnchorActivitySceneSnapshotForStream=function(" not in ui_export
 
 
 def test_runtime_journal_anchor_scene_seeds_live_registry_before_new_events():
