@@ -4199,15 +4199,15 @@ def _pool_entry_payloads(provider_id: str) -> list[dict[str, Any]]:
         if _cached is not None:
             _cp_ts, _cp_pool = _cached
             if (time.time() - _cp_ts) < 86400.0:
-                _all_entries = _cp_pool.entries()
+                _all_entries = _cp_pool.entries() if _cp_pool is not None and hasattr(_cp_pool, "entries") else []
             else:
                 _cp_pool = _load_pool(_pid)
                 _CREDENTIAL_POOL_CACHE[_ck] = (time.time(), _cp_pool)
-                _all_entries = _cp_pool.entries()
+                _all_entries = _cp_pool.entries() if _cp_pool is not None and hasattr(_cp_pool, "entries") else []
         else:
             _cp_pool = _load_pool(_pid)
             _CREDENTIAL_POOL_CACHE[_ck] = (time.time(), _cp_pool)
-            _all_entries = _cp_pool.entries()
+            _all_entries = _cp_pool.entries() if _cp_pool is not None and hasattr(_cp_pool, "entries") else []
     except ImportError:
         return []
 
@@ -4219,7 +4219,15 @@ def _pool_entry_payloads(provider_id: str) -> list[dict[str, Any]]:
             str(getattr(entry, "key_source", "") or ""),
         ):
             continue
-        payload = entry.to_dict() if hasattr(entry, "to_dict") else {}
+        if hasattr(entry, "to_dict") and callable(getattr(entry, "to_dict")):
+            payload = entry.to_dict()
+        elif isinstance(entry, dict):
+            payload = dict(entry)
+        else:
+            try:
+                payload = dict(vars(entry))
+            except TypeError:
+                payload = {}
         if not isinstance(payload, dict):
             payload = {}
         payload = dict(payload)
