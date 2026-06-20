@@ -6906,6 +6906,9 @@ def _thread_local_env_value(name: str, default: str = "") -> str:
             return default
         return str(thread_value)
 
+    if bool(getattr(_thread_ctx, "block_process_env_fallback", False)):
+        return default or ""
+
     return str(os.getenv(env_name, default or ""))
 
 

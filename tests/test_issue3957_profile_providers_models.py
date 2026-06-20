@@ -250,6 +250,24 @@ def test_active_request_legacy_scope_still_mirrors_process_env(monkeypatch, tmp_
         profiles.clear_request_profile()
 
 
+def test_active_request_readonly_scope_blocks_process_env_fallback(monkeypatch, tmp_path):
+    """Named profiles without a key should not inherit the process-default key."""
+    from api.providers import _provider_has_key
+
+    base = tmp_path / ".hermes"
+    (base / "profiles" / "work").mkdir(parents=True)
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", base)
+    monkeypatch.setenv("OPENAI_API_KEY", "from-process-env")
+
+    profiles.set_request_profile("work")
+    try:
+        assert _provider_has_key("openai") is True
+        with profiles.profile_env_for_active_request_readonly("test"):
+            assert _provider_has_key("openai") is False
+    finally:
+        profiles.clear_request_profile()
+
+
 def test_providers_and_models_routes_wrap_in_profile_env():
     """The two read routes are profile-scoped for non-default profiles (#3957).
 

@@ -950,14 +950,19 @@ def profile_env_for_active_request_readonly(
     thread_env = dict(safe_runtime_env)
     thread_env["HERMES_HOME"] = str(profile_home_path)
     previous_thread_env = getattr(_thread_ctx, "env", {}).copy()
+    previous_block_process_env = bool(
+        getattr(_thread_ctx, "block_process_env_fallback", False)
+    )
     home_override_token = None
     try:
         _set_thread_env(**thread_env)
+        _thread_ctx.block_process_env_fallback = True
         home_override_token = set_hermes_home_override(profile_home_path)
         yield
     finally:
         if home_override_token is not None:
             reset_hermes_home_override(home_override_token)
+        _thread_ctx.block_process_env_fallback = previous_block_process_env
         if previous_thread_env:
             _set_thread_env(**previous_thread_env)
         else:
