@@ -1,11 +1,9 @@
 """Static regressions for mobile titlebar session title priority (#4520)."""
-import re, pathlib, pytest
+import pathlib
 
 ROOT = pathlib.Path(__file__).parent.parent
 HTML = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
 PANELS_JS = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
-STYLE_CSS = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
-SESSIONS_JS = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
 
 
 def test_titlebar_title_element_exists():

@@ -154,20 +154,20 @@ function syncAppTitlebar() {
 
   // Dismiss stale popover on session/panel switch
   const _existingPop = document.querySelector('.app-titlebar-title-popover');
-  if (_existingPop) _existingPop.remove();
+  if (_existingPop) { _existingPop.remove(); titleEl._titlePopover = null; }
 
   // Mobile touch interactions
   if ('ontouchstart' in window) {
     // Tap-to-reveal full title popover — wired once per element lifetime
     if (!titleEl._mobileTouchWired) {
       titleEl._mobileTouchWired = true;
-      let _titlePopover = null;
+      titleEl._titlePopover = null;
       const _dismissTitlePopover = () => {
-        if (_titlePopover) { _titlePopover.remove(); _titlePopover = null; }
+        if (titleEl._titlePopover) { titleEl._titlePopover.remove(); titleEl._titlePopover = null; }
       };
       titleEl.addEventListener('click', function _onTitleClick(e) {
         if (_renamingAppTitlebar) return;
-        if (_titlePopover) {
+        if (titleEl._titlePopover) {
           _dismissTitlePopover();
           return;
         }
@@ -181,7 +181,7 @@ function syncAppTitlebar() {
         pop.style.top = (rect.bottom + 6) + 'px';
         pop.style.left = Math.max(8, rect.left) + 'px';
         pop.style.maxWidth = (window.innerWidth - 16) + 'px';
-        _titlePopover = pop;
+        titleEl._titlePopover = pop;
         const _outside = (ev) => {
           if (!pop.contains(ev.target) && ev.target !== titleEl) {
             _dismissTitlePopover();
