@@ -3,6 +3,12 @@
 
 ## [Unreleased]
 
+## [v0.51.600] — 2026-06-23 — Release VG (suppress footer jitter during virtual-scroll measurement)
+
+### Fixed
+
+- **The message footer (timestamp + usage stats + actions) no longer flickers/jitters during virtualized-list measurement re-renders.** While the virtual transcript re-measured row heights, the footer's fade transitions fired on each measurement pass, producing a visible jitter. Footer transitions are now suppressed for the duration of the measurement re-render only (a scoped `vscroll-measuring` class, removed in a `finally` so it can never leak), so the footer stays stable while scrolling a long conversation. Thanks @rodboev. (#4474)
+
 ## [v0.51.599] — 2026-06-23 — Release VF (dedupe live progress reasoning echoes)
 
 ### Fixed

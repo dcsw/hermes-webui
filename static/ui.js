@@ -871,7 +871,8 @@ function _compensateScrollForMeasurementDelta(renderFn){
   if(!container) return renderFn();
   const anchorBefore=_captureMessageViewportAnchor();
   const scrollTopBefore=container.scrollTop;
-  renderFn();
+  container.classList.add('vscroll-measuring');
+  try{ renderFn(); }finally{ container.classList.remove('vscroll-measuring'); }
   if(!anchorBefore) return;
   if(scrollTopBefore<1){
     const spacer=container.querySelector('[data-virtual-spacer="before"]');
