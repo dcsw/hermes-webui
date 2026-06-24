@@ -2,6 +2,8 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/lib/health_probe.sh
+. "${REPO_ROOT}/scripts/lib/health_probe.sh"
 HERMES_HOME="${HERMES_HOME:-${HOME}/.hermes}"
 PID_FILE="${HERMES_WEBUI_PID_FILE:-${HERMES_HOME}/webui.pid}"
 LOG_FILE="${HERMES_WEBUI_LOG_FILE:-${HERMES_HOME}/webui.log}"
@@ -41,6 +43,11 @@ _load_repo_dotenv_preserving_env() {
     key="${key#export }"
     key="${key//[[:space:]]/}"
     [[ "${key}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+    # Skip shell-readonly names (UID/GID/EUID/EGID/PPID); re-exporting them
+    # below would abort under `set -euo pipefail` with "readonly variable".
+    case "${key}" in
+      UID | GID | EUID | EGID | PPID) continue ;;
+    esac
     if [[ -n "${!key+x}" ]]; then
       value="${!key}"
       preserved+=("${key}=${value}")
@@ -48,8 +55,19 @@ _load_repo_dotenv_preserving_env() {
   done < "${env_file}"
 
   set -a
+  # Filter out shell-readonly vars (UID, GID, EUID, EGID, PPID) before
+  # sourcing.  docker-compose.yml's macOS instructions document
+  # `echo "UID=$(id -u)" >> .env`; under `set -euo pipefail` a raw
+  # `source .env` then aborts with "UID: readonly variable" before
+  # `ctl.sh status` can print anything.  Mirrors the guard start.sh uses.
+  local _ctl_env_filtered
+  _ctl_env_filtered="$(mktemp "${TMPDIR:-/tmp}/hermes-webui-ctl-env.XXXXXX")"
+  # shellcheck disable=SC2064
+  trap "rm -f '${_ctl_env_filtered}'" RETURN
+  grep -vE '^[[:space:]]*(export[[:space:]]+)?(UID|GID|EUID|EGID|PPID)=' "${env_file}" > "${_ctl_env_filtered}" || true
   # shellcheck source=/dev/null
-  source "${env_file}"
+  source "${_ctl_env_filtered}"
+  rm -f "${_ctl_env_filtered}"
   set +a
 
   local assignment
@@ -165,21 +183,96 @@ _is_alive() {
   kill -0 "${pid}" >/dev/null 2>&1
 }
 
-_proc_args() {
+_is_windows_bash() {
+  [[ "${OS:-}" == "Windows_NT" ]] && return 0
+  case "$(uname -s 2>/dev/null || true)" in
+    MINGW*|MSYS*|CYGWIN*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+_windows_bash_path() {
+  local path="${1//\\//}" drive rest
+  if [[ "${path}" =~ ^([A-Za-z]):(.*)$ ]]; then
+    drive="${BASH_REMATCH[1],,}"
+    rest="${BASH_REMATCH[2]}"
+    printf '/%s%s\n' "${drive}" "${rest}"
+    return
+  fi
+  printf '%s\n' "${path}"
+}
+
+_windows_pid_for_bash_pid() {
   local pid="$1"
-  ps -p "${pid}" -o args= 2>/dev/null || true
+  ps -p "${pid}" -l 2>/dev/null | awk 'NR == 2 { print $4 }'
+}
+
+_stop_webui_pid() {
+  local pid="$1" signal="${2:-TERM}"
+  if _is_windows_bash && command -v taskkill >/dev/null 2>&1; then
+    local winpid
+    winpid="$(_windows_pid_for_bash_pid "${pid}")"
+    if [[ "${winpid}" =~ ^[0-9]+$ ]]; then
+      taskkill //F //T //PID "${winpid}" >/dev/null 2>&1 || true
+      return
+    fi
+  fi
+  if [[ "${signal}" == "KILL" ]]; then
+    kill -KILL "${pid}" >/dev/null 2>&1 || true
+  else
+    kill "${pid}" >/dev/null 2>&1 || true
+  fi
+}
+
+_proc_args() {
+  local pid="$1" args
+  args="$(ps -p "${pid}" -o args= 2>/dev/null || true)"
+  if [[ -n "${args}" ]]; then
+    printf '%s\n' "${args}"
+    return
+  fi
+  if _is_windows_bash; then
+    local winpid
+    winpid="$(_windows_pid_for_bash_pid "${pid}")"
+    if [[ "${winpid}" =~ ^[0-9]+$ ]] && command -v wmic >/dev/null 2>&1; then
+      args="$(wmic process where "ProcessId=${winpid}" get CommandLine //value 2>/dev/null | sed -n 's/^CommandLine=//p' | tr -d '\r')"
+      if [[ -n "${args}" ]]; then
+        printf '%s\n' "${args}"
+        return
+      fi
+    fi
+    ps -p "${pid}" -f 2>/dev/null | awk 'NR == 2 { for (i = 8; i <= NF; i++) printf "%s%s", (i == 8 ? "" : " "), $i; print "" }'
+  fi
 }
 
 _is_owned_webui_pid() {
-  local pid="$1" args state_repo="" state_python=""
+  local pid="$1" args args_slash state_repo="" state_repo_slash="" state_repo_win="" state_repo_win_slash="" state_python="" state_python_slash="" state_python_bash=""
   [[ -f "${STATE_FILE}" ]] || return 1
   _load_state_if_present
   state_repo="${REPO_ROOT:-}"
   state_python="${PYTHON_EXE:-}"
+  state_repo_slash="${state_repo//\\//}"
+  state_python_slash="${state_python//\\//}"
+  if _is_windows_bash; then
+    state_repo_win="$(cygpath -w "${state_repo}" 2>/dev/null || true)"
+    state_repo_win_slash="${state_repo_win//\\//}"
+  fi
+  if [[ -n "${state_python}" ]] && _is_windows_bash; then
+    state_python_bash="$(_windows_bash_path "${state_python}")"
+  fi
   [[ "${state_repo}" == "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" ]] || return 1
   args="$(_proc_args "${pid}")"
   [[ -n "${args}" ]] || return 1
-  [[ "${args}" == *"${state_repo}/bootstrap.py"* || "${args}" == *"${state_repo}/server.py"* || "${args}" == *"${state_repo}/start.sh"* || ( -n "${state_python}" && "${args}" == *"${state_python}"* ) ]]
+  args_slash="${args//\\//}"
+  [[ "${args_slash}" == *"${state_repo_slash}/bootstrap.py"* ||
+     "${args_slash}" == *"${state_repo_slash}/server.py"* ||
+     "${args_slash}" == *"${state_repo_slash}/start.sh"* ||
+     ( -n "${state_repo_win_slash}" && "${args_slash}" == *"${state_repo_win_slash}/bootstrap.py"* ) ||
+     ( -n "${state_repo_win_slash}" && "${args_slash}" == *"${state_repo_win_slash}/server.py"* ) ||
+     ( -n "${state_repo_win_slash}" && "${args_slash}" == *"${state_repo_win_slash}/start.sh"* ) ||
+     ( -n "${state_python}" && "${args}" == *"${state_python}"* ) ||
+     ( -n "${state_python_slash}" && "${args_slash}" == *"${state_python_slash}"* ) ||
+     ( -n "${state_python_bash}" && "${args_slash}" == *"${state_python_bash}"* ) ]]
 }
 
 _current_pid() {
@@ -308,7 +401,7 @@ stop_cmd() {
   fi
 
   echo "[ctl] Stopping Hermes WebUI (PID ${pid})"
-  kill "${pid}" >/dev/null 2>&1 || true
+  _stop_webui_pid "${pid}" TERM
   local i
   for i in {1..50}; do
     if ! _is_alive "${pid}"; then
@@ -320,17 +413,21 @@ stop_cmd() {
   done
 
   echo "[ctl] Process did not exit after SIGTERM; sending SIGKILL" >&2
-  kill -KILL "${pid}" >/dev/null 2>&1 || true
+  _stop_webui_pid "${pid}" KILL
   rm -f "${PID_FILE}" "${STATE_FILE}"
 }
 
 _health_line() {
-  local host="$1" port="$2" url result
-  url="http://${host}:${port}/health"
-  if command -v curl >/dev/null 2>&1; then
-    if result="$(curl -fsS --max-time 2 "${url}" 2>/dev/null)"; then
-      if command -v python3 >/dev/null 2>&1; then
-        printf '%s' "${result}" | python3 -c 'import json,sys
+  local host="$1" port="$2" url scheme result
+  scheme="$(hermes_webui_probe_scheme)"
+  url="${scheme}://${host}:${port}/health"
+  if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
+    echo "unknown (curl/wget not found; ${url})"
+    return 0
+  fi
+  if result="$(hermes_webui_probe_health "${host}" "${port}" "/health" 2)"; then
+    if command -v python3 >/dev/null 2>&1; then
+      printf '%s' "${result}" | python3 -c 'import json,sys
 try:
     data=json.load(sys.stdin)
     sessions=data.get("sessions", data.get("session_count", "?"))
@@ -339,19 +436,17 @@ try:
     print(f"ok ({sessions} sessions, {active} active streams)" if status == "ok" else status)
 except Exception:
     print("ok")'
-      else
-        echo "ok"
-      fi
     else
-      echo "unreachable (${url})"
+      echo "ok"
     fi
   else
-    echo "unknown (curl not found; ${url})"
+    echo "unreachable (${url})"
   fi
 }
 
 status_cmd() {
   ensure_home
+  _load_repo_dotenv_preserving_env
   _load_state_if_present
   local host="${HOST:-${HERMES_WEBUI_HOST:-127.0.0.1}}"
   local port="${PORT:-${HERMES_WEBUI_PORT:-8787}}"

@@ -9,6 +9,7 @@ import http.cookies
 import json
 import logging
 import os
+import re
 import secrets
 import tempfile
 import threading
@@ -56,6 +57,33 @@ PUBLIC_PATHS = frozenset({
 
 COOKIE_NAME = 'hermes_session'
 CSRF_HEADER_NAME = 'X-Hermes-CSRF-Token'
+
+
+# RFC 6265 cookie-name token: a non-empty run of token chars
+# (no controls, whitespace, or separators such as ';', '=', ',').
+_COOKIE_NAME_RE = re.compile(r"^[-!#$%&'*+.^_`|~0-9A-Za-z]+$")
+
+
+def _resolve_cookie_name() -> str:
+    """Resolve the auth session cookie name from env > default.
+
+    Honours ``HERMES_WEBUI_COOKIE_NAME`` so multiple WebUI instances sharing a
+    hostname (different ports) can use distinct cookie names instead of
+    trampling each other's session — browsers scope cookies by host, not
+    host+port (RFC 6265). Falls back to ``COOKIE_NAME`` when the env var is
+    unset, empty, or not a valid RFC 6265 token.
+    """
+    name = os.getenv('HERMES_WEBUI_COOKIE_NAME', '').strip()
+    if not name:
+        return COOKIE_NAME
+    if _COOKIE_NAME_RE.match(name):
+        return name
+    logger.warning(
+        'Ignoring invalid HERMES_WEBUI_COOKIE_NAME=%r; falling back to %r '
+        '(name must be a valid RFC 6265 token)', name, COOKIE_NAME,
+    )
+    return COOKIE_NAME
+
 
 _SESSIONS_FILE = STATE_DIR / '.sessions.json'
 
@@ -439,6 +467,53 @@ def _session_token_from_cookie_value(cookie_value: str) -> str | None:
     return token or None
 
 
+def sign_profile_cookie_value(profile_name: str, session_cookie_value: str | None) -> str:
+    """Return a profile cookie value authenticated for one WebUI session.
+
+    The active-profile cookie is client-controlled, so when auth is enabled it
+    must not be trusted as a bare profile name. Binding the selected profile to
+    the HttpOnly session token prevents a client from forging
+    ``hermes_profile=<other-profile>`` and bypassing profile visibility guards.
+    """
+    if not session_cookie_value or not verify_session(session_cookie_value):
+        raise ValueError("active auth session is required to sign profile cookie")
+    token = _session_token_from_cookie_value(session_cookie_value)
+    if not token:
+        raise ValueError("active auth session is required to sign profile cookie")
+    sig = hmac.new(
+        _signing_key(),
+        f"profile:{token}:{profile_name}".encode(),
+        hashlib.sha256,
+    ).hexdigest()
+    return f"{profile_name}.{sig}"
+
+
+def verify_profile_cookie_value(cookie_value: str, session_cookie_value: str | None) -> str | None:
+    """Verify a session-bound profile cookie and return its profile name."""
+    if not cookie_value or '.' not in cookie_value:
+        return None
+    if not session_cookie_value or not verify_session(session_cookie_value):
+        return None
+    profile_name, sig = cookie_value.rsplit('.', 1)
+    token = _session_token_from_cookie_value(session_cookie_value)
+    if not profile_name or not token or not sig:
+        return None
+    # Defense-in-depth: validate the profile-name pattern here too, not only in
+    # get_profile_cookie(), so any future caller of this verifier can't return an
+    # unvalidated name. (#4023 Opus hardening.)
+    from api.profiles import _PROFILE_ID_RE
+    if profile_name != 'default' and not _PROFILE_ID_RE.fullmatch(profile_name):
+        return None
+    expected = hmac.new(
+        _signing_key(),
+        f"profile:{token}:{profile_name}".encode(),
+        hashlib.sha256,
+    ).hexdigest()
+    if hmac.compare_digest(str(sig), expected):
+        return profile_name
+    return None
+
+
 def csrf_token_for_session(cookie_value: str) -> str | None:
     """Return the CSRF token bound to an authenticated WebUI session.
 
@@ -482,7 +557,7 @@ def parse_cookie(handler) -> str | None:
         cookie.load(cookie_header)
     except http.cookies.CookieError:
         return None
-    morsel = cookie.get(COOKIE_NAME)
+    morsel = cookie.get(_resolve_cookie_name())
     return morsel.value if morsel else None
 
 
@@ -540,21 +615,36 @@ def check_auth(handler, parsed) -> bool:
     return False
 
 
+def _is_loopback(addr: str) -> bool:
+    """Return True if *addr* is a loopback address (127.x.x.x, ::1, or ::ffff:127.x.x.x)."""
+    import ipaddress as _ipaddress
+    try:
+        ip = _ipaddress.ip_address(addr)
+        if ip.is_loopback:
+            return True
+        # Python < 3.12: is_loopback is False for ::ffff:127.x.x.x (gh-117566)
+        if hasattr(ip, 'ipv4_mapped') and ip.ipv4_mapped is not None:
+            return ip.ipv4_mapped.is_loopback
+        return False
+    except ValueError:
+        return False
+
+
 def _is_secure_context(handler=None) -> bool:
     """Return True if cookies should carry the Secure flag.
 
-    Behaviour is overridable via HERMES_WEBUI_SECURE env var for
-    reverse-proxy setups where TLS terminates at a frontend proxy
-    (nginx, Cloudflare, etc.) and Python only sees plain HTTP.
-    1/true/yes → force Secure on; 0/false/no → force Secure off.
-    When unset, fall back to heuristics: direct TLS socket (getpeercert)
-    or X-Forwarded-Proto header from the request.
+    Priority order:
+    1. ``HERMES_WEBUI_SECURE`` env var: 1/true/yes -> True; 0/false/no -> False.
+    2. Direct TLS socket (handler.request.getpeercert present) -> True.
+    3. ``HERMES_WEBUI_TRUST_FORWARDED_PROTO=1`` opt-in: trust
+       ``X-Forwarded-Proto: https`` header from a known reverse proxy.
+    4. Otherwise -> False (loopback or non-loopback, plain HTTP is not secure).
 
     .. warning::
-       The ``X-Forwarded-Proto`` header is only trustworthy when a
-       reverse proxy (nginx, Cloudflare, etc.) is deployed in front
-       of the application.  Without a proxy, any client can forge the
-       header and cause the Secure flag to be set on plain HTTP.
+       ``X-Forwarded-Proto`` is only trustworthy behind a reverse proxy.
+       It is ignored unless ``HERMES_WEBUI_TRUST_FORWARDED_PROTO=1`` is
+       set explicitly, preventing header-injection attacks on plain-HTTP
+       deployments.
     """
     env = os.getenv('HERMES_WEBUI_SECURE', '').strip().lower()
     if env in ('1', 'true', 'yes'):
@@ -564,29 +654,33 @@ def _is_secure_context(handler=None) -> bool:
     if handler is not None:
         if getattr(handler.request, 'getpeercert', None) is not None:
             return True
-        if handler.headers.get('X-Forwarded-Proto', '') == 'https':
-            return True
+        trust_fwd = os.getenv('HERMES_WEBUI_TRUST_FORWARDED_PROTO', '').strip().lower()
+        if trust_fwd in ('1', 'true', 'yes'):
+            if handler.headers.get('X-Forwarded-Proto', '') == 'https':
+                return True
     return False
 
 
 def set_auth_cookie(handler, cookie_value) -> None:
     """Set the auth cookie on the response."""
     cookie = http.cookies.SimpleCookie()
-    cookie[COOKIE_NAME] = cookie_value
-    cookie[COOKIE_NAME]['httponly'] = True
-    cookie[COOKIE_NAME]['samesite'] = 'Lax'
-    cookie[COOKIE_NAME]['path'] = '/'
-    cookie[COOKIE_NAME]['max-age'] = str(_resolve_session_ttl())
+    name = _resolve_cookie_name()
+    cookie[name] = cookie_value
+    cookie[name]['httponly'] = True
+    cookie[name]['samesite'] = 'Lax'
+    cookie[name]['path'] = '/'
+    cookie[name]['max-age'] = str(_resolve_session_ttl())
     if _is_secure_context(handler):
-        cookie[COOKIE_NAME]['secure'] = True
-    handler.send_header('Set-Cookie', cookie[COOKIE_NAME].OutputString())
+        cookie[name]['secure'] = True
+    handler.send_header('Set-Cookie', cookie[name].OutputString())
 
 
 def clear_auth_cookie(handler) -> None:
     """Clear the auth cookie on the response."""
     cookie = http.cookies.SimpleCookie()
-    cookie[COOKIE_NAME] = ''
-    cookie[COOKIE_NAME]['httponly'] = True
-    cookie[COOKIE_NAME]['path'] = '/'
-    cookie[COOKIE_NAME]['max-age'] = '0'
-    handler.send_header('Set-Cookie', cookie[COOKIE_NAME].OutputString())
+    name = _resolve_cookie_name()
+    cookie[name] = ''
+    cookie[name]['httponly'] = True
+    cookie[name]['path'] = '/'
+    cookie[name]['max-age'] = '0'
+    handler.send_header('Set-Cookie', cookie[name].OutputString())

@@ -346,6 +346,32 @@ function _setTerminalChromeState(state){
   if(dockWorkspace)dockWorkspace.textContent=label;
 }
 
+function syncTerminalBackendState(data){
+  S.terminalRemoteBackend=!!(data&&data.terminal_remote_backend);
+  return S.terminalRemoteBackend;
+}
+
+function _terminalRemoteBackendUnsupportedMessage(){
+  const key=t('terminal_remote_backend_unsupported');
+  return key&&key!=='terminal_remote_backend_unsupported'
+    ? key
+    : 'Embedded terminal is only supported for local terminal backends.';
+}
+
+function _terminalStartErrorMessage(err){
+  if(err&&err.body){
+    try{
+      const payload=JSON.parse(err.body);
+      if(payload&&payload.error==='remote_terminal_backend_unsupported'){
+        S.terminalRemoteBackend=true;
+        syncTerminalButton();
+        return String(payload.message||_terminalRemoteBackendUnsupportedMessage());
+      }
+    }catch(_){}
+  }
+  return err&&err.message?err.message:String(err||'');
+}
+
 function syncTerminalButton(){
   const {toggle}= _terminalEls();
   const currentSid=_terminalSessionId();
@@ -355,10 +381,15 @@ function syncTerminalButton(){
   }
   if(!toggle)return;
   const hasWorkspace=!!(S.session&&S.session.workspace);
-  toggle.disabled=!hasWorkspace;
+  const remoteBackend=!!S.terminalRemoteBackend;
+  toggle.disabled=!hasWorkspace||remoteBackend;
   toggle.classList.toggle('active',TERMINAL_UI.open);
   toggle.setAttribute('aria-pressed',TERMINAL_UI.open?'true':'false');
-  toggle.title=hasWorkspace?(TERMINAL_UI.collapsed?t('terminal_expand'):t('terminal_open_title')):t('terminal_no_workspace_title');
+  toggle.title=!hasWorkspace
+    ? t('terminal_no_workspace_title')
+    : (remoteBackend
+      ? _terminalRemoteBackendUnsupportedMessage()
+      : (TERMINAL_UI.collapsed?t('terminal_expand'):t('terminal_open_title')));
   toggle.setAttribute('aria-label',toggle.title);
 }
 
@@ -370,7 +401,7 @@ function _connectTerminalOutput(){
   const sid=_terminalSessionId();
   if(!sid)return;
   if(TERMINAL_UI.source){
-    try{TERMINAL_UI.source.close();}catch(_){}
+    try{if(TERMINAL_UI.source.readyState!==2)TERMINAL_UI.source.close();}catch(_){}
     TERMINAL_UI.source=null;
   }
   const url=new URL('api/terminal/output',document.baseURI||location.href);
@@ -388,7 +419,7 @@ function _connectTerminalOutput(){
   source.addEventListener('terminal_closed',()=>{
     if(TERMINAL_UI.source!==source)return;
     if(TERMINAL_UI.term)TERMINAL_UI.term.writeln('\r\n[terminal closed]\r\n');
-    try{source.close();}catch(_){}
+    try{if(source&&source.readyState!==2)source.close();}catch(_){}
     TERMINAL_UI.source=null;
     setTimeout(()=>closeComposerTerminal(null,{skipApi:true}),260);
   });
@@ -397,7 +428,7 @@ function _connectTerminalOutput(){
     let msg=t('terminal_error');
     try{msg=(JSON.parse(ev.data)||{}).error||msg;}catch(_){}
     if(TERMINAL_UI.term)TERMINAL_UI.term.writeln('\r\n[terminal error] '+msg+'\r\n');
-    try{source.close();}catch(_){}
+    try{if(source&&source.readyState!==2)source.close();}catch(_){}
     TERMINAL_UI.source=null;
   });
 }
@@ -409,16 +440,26 @@ async function _startComposerTerminal(restart=false){
     syncTerminalButton();
     return;
   }
+  if(S.terminalRemoteBackend){
+    showToast(_terminalRemoteBackendUnsupportedMessage(),3200,'warning');
+    syncTerminalButton();
+    return;
+  }
   const term=_ensureXterm();
   if(!term)return;
   _fitTerminal();
   const dims=_terminalDimensions();
-  await api('/api/terminal/start',{method:'POST',body:JSON.stringify({
-    session_id:sid,
-    rows:dims.rows,
-    cols:dims.cols,
-    restart:!!restart,
-  })});
+  try{
+    await api('/api/terminal/start',{method:'POST',body:JSON.stringify({
+      session_id:sid,
+      rows:dims.rows,
+      cols:dims.cols,
+      restart:!!restart,
+    })});
+  }catch(e){
+    e.message=_terminalStartErrorMessage(e);
+    throw e;
+  }
   TERMINAL_UI.sessionId=sid;
   TERMINAL_UI.workspace=S.session&&S.session.workspace||null;
   TERMINAL_UI.typedLine='';
@@ -516,7 +557,7 @@ async function closeComposerTerminal(sessionId,opts){
   opts=opts||{};
   const sid=sessionId||TERMINAL_UI.sessionId||_terminalSessionId();
   if(TERMINAL_UI.source){
-    try{TERMINAL_UI.source.close();}catch(_){}
+    try{if(TERMINAL_UI.source&&TERMINAL_UI.source.readyState!==2)TERMINAL_UI.source.close();}catch(_){}
     TERMINAL_UI.source=null;
   }
   if(sid&&!opts.skipApi){
@@ -547,7 +588,7 @@ async function closeComposerTerminal(sessionId,opts){
 async function restartComposerTerminal(){
   if(!TERMINAL_UI.open||TERMINAL_UI.collapsed)return;
   if(TERMINAL_UI.source){
-    try{TERMINAL_UI.source.close();}catch(_){}
+    try{if(TERMINAL_UI.source&&TERMINAL_UI.source.readyState!==2)TERMINAL_UI.source.close();}catch(_){}
     TERMINAL_UI.source=null;
   }
   if(TERMINAL_UI.term)TERMINAL_UI.term.reset();
@@ -605,7 +646,7 @@ async function _resizeComposerTerminal(){
 }
 
 window.addEventListener('beforeunload',()=>{
-  if(TERMINAL_UI.source)try{TERMINAL_UI.source.close();}catch(_){}
+  if(TERMINAL_UI.source)try{if(TERMINAL_UI.source&&TERMINAL_UI.source.readyState!==2)TERMINAL_UI.source.close();}catch(_){}
   if(TERMINAL_UI.sessionId){
     const url=new URL('api/terminal/close',document.baseURI||location.href).href;
     const body=JSON.stringify({session_id:TERMINAL_UI.sessionId});

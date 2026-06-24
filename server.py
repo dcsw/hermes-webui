@@ -8,6 +8,7 @@ import os
 import re
 import signal
 import socket
+import ssl
 import sys
 import threading
 import time
@@ -134,58 +135,14 @@ from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
-_CSP_CONNECT_BASE = (
-    "'self' http://127.0.0.1:* http://localhost:* "
-    "ws://127.0.0.1:* ws://localhost:*"
-)
-_CSP_EXTRA_CONNECT_RE = re.compile(
-    r"^(?:https?|wss?)://(?:\*\.)?[A-Za-z0-9._~-]+(?::(?P<port>\d{1,5}|\*))?$"
-)
-
-
-def _valid_csp_extra_connect_source(source: str) -> bool:
-    match = _CSP_EXTRA_CONNECT_RE.fullmatch(source)
-    if not match:
-        return False
-    port = match.group("port")
-    if not port or port == "*":
-        return True
-    try:
-        return 1 <= int(port) <= 65535
-    except ValueError:
-        return False
-
-
-def _csp_extra_connect_src() -> str:
-    raw = os.getenv("HERMES_WEBUI_CSP_CONNECT_EXTRA", "").strip()
-    if not raw:
-        return ""
-    sources = raw.split()
-    if not sources or any(not _valid_csp_extra_connect_source(src) for src in sources):
-        logger.warning("Ignoring invalid HERMES_WEBUI_CSP_CONNECT_EXTRA value")
-        return ""
-    return " " + " ".join(sources)
-
-
-def _build_csp_report_only_policy() -> str:
-    connect_src = _CSP_CONNECT_BASE + _csp_extra_connect_src()
-    return (
-        "default-src 'self'; "
-        "base-uri 'self'; "
-        "object-src 'none'; "
-        "frame-ancestors 'self'; "
-        "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
-        "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
-        "img-src 'self' data: blob:; "
-        "font-src 'self' data:; "
-        "media-src 'self' data: blob:; "
-        f"connect-src {connect_src}; "
-        "report-uri /api/csp-report; report-to csp-endpoint"
-    )
-
 from api.auth import check_auth
 from api.config import HOST, PORT, STATE_DIR, SESSION_DIR, DEFAULT_WORKSPACE
-from api.helpers import j, get_profile_cookie, _CLIENT_DISCONNECT_ERRORS
+from api.helpers import (
+    j,
+    get_profile_cookie,
+    _build_csp_report_only_policy,
+    _CLIENT_DISCONNECT_ERRORS,
+)
 from api.profiles import set_request_profile, clear_request_profile
 from api.routes import handle_delete, handle_get, handle_patch, handle_post, handle_put
 from api.startup import auto_install_agent_deps, fix_credential_permissions
@@ -201,6 +158,7 @@ class QuietHTTPServer(ThreadingHTTPServer):
         server_address = args[0] if args else kwargs.get('server_address', None)
         if server_address and ':' in server_address[0]:
             self.address_family = socket.AF_INET6
+        self.ssl_context: object | None = None
         super().__init__(*args, **kwargs)
         self.accept_loop_requests_total = 0
         self.accept_loop_last_request_at = 0.0
@@ -210,7 +168,49 @@ class QuietHTTPServer(ThreadingHTTPServer):
             self.allow_reuse_address = False
             SO_EXCLUSIVEADDRUSE = getattr(socket, 'SO_EXCLUSIVEADDRUSE', -5)
             self.socket.setsockopt(socket.SOL_SOCKET, SO_EXCLUSIVEADDRUSE, 1)
-        super().server_bind()
+            # Retry bind on Windows to handle the case where a previous
+            # process (e.g. during self-update) is still releasing the port.
+            # The old process calls os._exit(0) which starts tearing down
+            # its socket, but with SO_EXCLUSIVEADDRUSE the OS blocks new
+            # binds until the teardown completes.  Retry for up to 10 s.
+            max_retries = 20
+            retry_delay = 0.5
+            for attempt in range(max_retries):
+                try:
+                    super().server_bind()
+                    return
+                except OSError as e:
+                    if e.winerror == 10048 and attempt < max_retries - 1:  # WSAEADDRINUSE
+                        time.sleep(retry_delay)
+                    else:
+                        raise
+        else:
+            super().server_bind()
+
+    def get_request(self):
+        """Accept a connection without letting TLS handshakes block the loop.
+
+        ``ssl.wrap_socket(listening_socket)`` performs the TLS handshake inside
+        ``accept()``. A browser/network probe that opens TCP but never sends a
+        ClientHello can then freeze the one accept loop, leaving the process
+        alive but unable to serve any later clients. Accept the raw socket here
+        and wrap the accepted connection with ``do_handshake_on_connect=False``
+        so any slow/broken handshake times out in its own request thread.
+        """
+        request, client_address = self.socket.accept()
+        ssl_context = getattr(self, "ssl_context", None)
+        if ssl_context is None:
+            return request, client_address
+        try:
+            tls_request = ssl_context.wrap_socket(
+                request,
+                server_side=True,
+                do_handshake_on_connect=False,
+            )
+        except Exception:
+            request.close()
+            raise
+        return tls_request, client_address
 
     def _handle_request_noblock(self):
         """Record accept-loop progress before dispatching a request handler.
@@ -234,7 +234,10 @@ class QuietHTTPServer(ThreadingHTTPServer):
         exc_type, exc_value, _ = sys.exc_info()
         
         # Silently ignore common connection errors caused by client disconnects
-        if exc_type in (ConnectionResetError, BrokenPipeError, ConnectionAbortedError, TimeoutError):
+        if exc_type in (
+            ConnectionResetError, BrokenPipeError, ConnectionAbortedError,
+            TimeoutError, ssl.SSLError, ssl.SSLEOFError,
+        ):
             return
         
         # Also handle socket errors that indicate client disconnect
@@ -289,15 +292,27 @@ class Handler(BaseHTTPRequestHandler):
     _CSP_REPORT_TO = '{"group":"csp-endpoint","max_age":10886400,"endpoints":[{"url":"/api/csp-report"}]}'
 
     @classmethod
-    def csp_report_only_policy(cls) -> str:
-        return _build_csp_report_only_policy()
+    def csp_report_only_policy(cls, extra_connect_src=None) -> str:
+        return _build_csp_report_only_policy(extra_connect_src)
 
     def end_headers(self) -> None:
-        self.send_header("Content-Security-Policy-Report-Only", self.csp_report_only_policy())
+        extra_connect_src = getattr(self, "_csp_extra_connect_src", None)
+        self.send_header("Content-Security-Policy-Report-Only", self.csp_report_only_policy(extra_connect_src))
         self.send_header("Report-To", self._CSP_REPORT_TO)
         super().end_headers()
 
     def log_message(self, fmt, *args): pass  # suppress default Apache-style log
+
+    @staticmethod
+    def _safe_webui_print(message: str) -> None:
+        """Emit a request log line without letting logging break responses."""
+        try:
+            print(message, flush=True)
+        except Exception:
+            # Agent/tool code can redirect or close process-wide stdout/stderr
+            # in another thread. HTTP response handling must not depend on
+            # those global streams remaining writable.
+            pass
 
     def log_request(self, code: str='-', size: str='-') -> None:
         """Structured JSON logs for each request."""
@@ -325,7 +340,7 @@ class Handler(BaseHTTPRequestHandler):
         if forwarded_for:
             record_data['forwarded_for'] = forwarded_for
         record = _json.dumps(record_data)
-        print(f'[webui] {record}', flush=True)
+        self._safe_webui_print(f'[webui] {record}')
 
     def do_GET(self) -> None:
         self._req_t0 = time.time()
@@ -345,7 +360,7 @@ class Handler(BaseHTTPRequestHandler):
             # reconnect races; do not convert it into a misleading server 500.
             return
         except Exception:
-            print(f'[webui] ERROR {self.command} {self.path}\n' + traceback.format_exc(), flush=True)
+            self._safe_webui_print(f'[webui] ERROR {self.command} {self.path}\n' + traceback.format_exc())
             try:
                 j(self, {'error': 'Internal server error'}, status=500)
             except _CLIENT_DISCONNECT_ERRORS:
@@ -354,7 +369,7 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 # Unexpected failure while sending the error response itself.
                 # Log it so we know something is wrong with our error handler.
-                traceback.print_exc()
+                self._safe_webui_print(traceback.format_exc())
         finally:
             clear_request_profile()
 
@@ -384,7 +399,7 @@ class Handler(BaseHTTPRequestHandler):
             # reconnect races; do not convert it into a misleading server 500.
             return
         except Exception:
-            print(f'[webui] ERROR {self.command} {self.path}\n' + traceback.format_exc(), flush=True)
+            self._safe_webui_print(f'[webui] ERROR {self.command} {self.path}\n' + traceback.format_exc())
             try:
                 j(self, {'error': 'Internal server error'}, status=500)
             except _CLIENT_DISCONNECT_ERRORS:
@@ -393,7 +408,7 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 # Unexpected failure while sending the error response itself.
                 # Log it so we know something is wrong with our error handler.
-                traceback.print_exc()
+                self._safe_webui_print(traceback.format_exc())
         finally:
             clear_request_profile()
 
@@ -608,9 +623,41 @@ def main() -> None:
     # Start the gateway session watcher for real-time SSE updates
     try:
         from api.gateway_watcher import start_watcher
-        start_watcher()
+
+        def _start_watcher_safe():
+            try:
+                start_watcher()
+            except Exception as e:
+                print(f'[!!] WARNING: Gateway watcher failed to start: {e}', flush=True)
+
+        t = threading.Thread(target=_start_watcher_safe, daemon=True)
+        t.start()
+        t.join(timeout=5)
+        if t.is_alive():
+            print('[tip] Gateway watcher still initializing (non-blocking)', flush=True)
     except Exception as e:
         print(f'[!!] WARNING: Gateway watcher failed to start: {e}', flush=True)
+
+    # Start the bg_task_complete drain thread for terminal(notify_on_complete=true)
+    # agent wakeup. Reads tools.process_registry.completion_queue and emits SSE
+    # bg_task_complete events (canonical name; legacy process_complete alias is
+    # still emitted for back-compat) to the matching session's stream.
+    try:
+        from api.background_process import start_drain_thread
+        if start_drain_thread():
+            print('[ok] bg_task_complete drain thread started', flush=True)
+    except Exception as e:
+        print(f'[!!] WARNING: bg_task_complete drain failed to start: {e}', flush=True)
+
+    # Start the SessionChannel reaper for the persistent per-session SSE
+    # endpoint (/api/session/stream). Runs every 60s, collects channels with
+    # no subscribers past the grace period or past the idle TTL cap.
+    try:
+        from api.background_process import start_session_channel_reaper
+        if start_session_channel_reaper():
+            print('[ok] SessionChannel reaper thread started', flush=True)
+    except Exception as e:
+        print(f'[!!] WARNING: SessionChannel reaper failed to start: {e}', flush=True)
 
     # Load WebUI dashboard plugins
     try:
@@ -631,7 +678,7 @@ def main() -> None:
             ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
             ctx.minimum_version = ssl.TLSVersion.TLSv1_2
             ctx.load_cert_chain(TLS_CERT, TLS_KEY)
-            httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True)
+            httpd.ssl_context = ctx
             print(f'  TLS enabled: cert={TLS_CERT}, key={TLS_KEY}', flush=True)
         except Exception as e:
             print(f'[!!] WARNING: TLS setup failed ({e}), falling back to HTTP', flush=True)
@@ -659,6 +706,20 @@ def main() -> None:
             drain_all_on_shutdown()
         except Exception:
             logger.debug("Failed to drain lifecycle on shutdown", exc_info=True)
+        # Stop bg_task_complete drain + SessionChannel reaper (ours-original).
+        # The drain thread emits the canonical ``bg_task_complete`` event
+        # (with ``process_complete`` kept as a temporary backward-compat
+        # alias for older clients — see start_drain_thread comment above).
+        try:
+            from api.background_process import stop_drain_thread
+            stop_drain_thread()
+        except Exception:
+            logger.debug("Failed to stop bg_task_complete drain thread during shutdown", exc_info=True)
+        try:
+            from api.background_process import stop_session_channel_reaper
+            stop_session_channel_reaper()
+        except Exception:
+            logger.debug("Failed to stop SessionChannel reaper during shutdown", exc_info=True)
 
 if __name__ == '__main__':
     main()

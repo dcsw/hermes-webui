@@ -77,7 +77,7 @@ class TestPromptNewFileNoSession:
 
     def test_prompt_new_file_auto_creates_session(self):
         src = read('static/ui.js')
-        m = re.search(r'async function promptNewFile\(\)\{.*?\n\}', src, re.DOTALL)
+        m = re.search(r'async function promptNewFile\([^)]*\)\{.*?\n\}', src, re.DOTALL)
         assert m, "promptNewFile not found"
         fn = m.group(0)
         # Must have auto-create path (not just early return when no session)
@@ -92,7 +92,7 @@ class TestPromptNewFileNoSession:
 
     def test_prompt_new_folder_auto_creates_session(self):
         src = read('static/ui.js')
-        m = re.search(r'async function promptNewFolder\(\)\{.*?\n\}', src, re.DOTALL)
+        m = re.search(r'async function promptNewFolder\([^)]*\)\{.*?\n\}', src, re.DOTALL)
         assert m, "promptNewFolder not found"
         fn = m.group(0)
         assert '_profileDefaultWorkspace' in fn, (
@@ -105,7 +105,7 @@ class TestPromptNewFileNoSession:
     def test_prompt_new_file_still_returns_early_without_default(self):
         """If no default workspace, the function should return early (not crash)."""
         src = read('static/ui.js')
-        m = re.search(r'async function promptNewFile\(\)\{.*?\n\}', src, re.DOTALL)
+        m = re.search(r'async function promptNewFile\([^)]*\)\{.*?\n\}', src, re.DOTALL)
         assert m
         fn = m.group(0)
         # Must have a guard for empty workspace
@@ -127,6 +127,22 @@ class TestWorkspaceSwitcherBlankPage:
         )
         assert 'session/new' in fn, (
             "switchToWorkspace must call /api/session/new when S.session is null"
+        )
+
+    def test_switch_to_workspace_keeps_busy_guard_after_blank_page_create(self):
+        src = read('static/panels.js')
+        start = src.find('async function switchToWorkspace(')
+        assert start != -1, "switchToWorkspace not found"
+        fn = src[start:src.find('async function toggleWorktreePanel', start)]
+        assert "t('workspace_busy_switch')" in fn, (
+            "switchToWorkspace must keep the busy-session workspace switch toast"
+        )
+        blank_create = fn.index("api('/api/session/new'")
+        busy_guard = fn.index('if(S.busy)')
+        update_call = fn.index("api('/api/session/update'")
+        assert blank_create < busy_guard < update_call, (
+            "switchToWorkspace must auto-create blank-page sessions before the busy guard, "
+            "then return before workspace update while busy"
         )
 
     def test_prompt_workspace_path_auto_creates_session(self):

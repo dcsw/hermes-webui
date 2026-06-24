@@ -13,9 +13,12 @@ from api.config import STREAMS, create_stream_channel
 from api.models import new_session
 from api.gateway_chat import (
     _gateway_http_error_event,
+    _gateway_reasoning_delta,
     _gateway_sse_delta,
+    _gateway_sse_reasoning_delta,
     _gateway_stream_usage,
     _gateway_tool_progress_event,
+    _gateway_use_runs_api_enabled,
     gateway_chat_config_status,
     webui_chat_backend_mode,
     webui_gateway_chat_enabled,
@@ -130,7 +133,36 @@ def test_gateway_tool_progress_event_translates_gateway_lifecycle_payloads():
             "tid": "call-1",
         },
     )
+    assert _gateway_tool_progress_event(
+        {"tool": "_thinking", "status": "running", "preview": "Thinking..."}
+    ) == (
+        "reasoning",
+        {
+            "text": "Thinking...",
+        },
+    )
+    assert _gateway_tool_progress_event(
+        {"tool": "_thinking", "status": "running", "text": "Thinking from text..."}
+    ) == (
+        "reasoning",
+        {
+            "text": "Thinking from text...",
+        },
+    )
     assert _gateway_tool_progress_event({"tool": "_thinking", "status": "running"}) is None
+
+
+def test_gateway_reasoning_delta_keeps_string_deltas_and_ignores_structured_payloads():
+    assert _gateway_reasoning_delta({"text": " Let me"}) == " Let me"
+    assert _gateway_reasoning_delta({"text": "   ", "preview": " think"}) == " think"
+    assert _gateway_reasoning_delta({"content": {"text": "safe", "debug": {"note": "x"}}}) == ""
+    assert _gateway_reasoning_delta({"text": ["safe"], "preview": " more"}) == " more"
+
+
+def test_gateway_sse_reasoning_delta_extracts_reasoning_content_chunks():
+    assert _gateway_sse_reasoning_delta({"choices": [{"delta": {"reasoning_content": "Let me"}}]}) == "Let me"
+    assert _gateway_sse_reasoning_delta({"choices": [{"message": {"reasoning_content": "Done thinking"}}]}) == "Done thinking"
+    assert _gateway_sse_reasoning_delta({"choices": [{"delta": {"reasoning_content": "   "}}]}) == ""
 
 
 def test_gateway_http_401_reports_gateway_auth_not_provider_key():
@@ -235,6 +267,10 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
             yield b'data: {"tool":"terminal","label":"terminal: pytest","toolCallId":"call-1","status":"running"}\n\n'
             yield b'data: {"choices":[{"delta":{"content":"hel"}}]}\n\n'
             yield b'event: hermes.tool.progress\n'
+            yield b'data: {"tool":"_thinking","text":"Thinking from tool progress"}\n\n'
+            yield b'event: reasoning.available\n'
+            yield b'data: {"text":"Reasoning preview", "preview":"Reasoning preview"}\n\n'
+            yield b'event: hermes.tool.progress\n'
             yield b'data: {"tool":"terminal","toolCallId":"call-1","status":"completed"}\n\n'
             yield b'data: {"choices":[{"delta":{"content":"lo"}}],"usage":{"prompt_tokens":4,"completion_tokens":2}}\n\n'
             yield b'data: [DONE]\n\n'
@@ -247,7 +283,17 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
 
     monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://gateway.local")
     monkeypatch.setenv("HERMES_WEBUI_GATEWAY_API_KEY", "secret-token")
-    monkeypatch.setattr(streaming, "_load_webui_prefill_context", lambda cfg: {"status": "loaded", "source": "test", "label": "test", "message_count": 1, "messages": [{"role": "user", "content": "prefill"}]})
+    monkeypatch.setattr(gateway_chat, "_gateway_reasoning_effort_for_request", lambda *args, **kwargs: "high")
+    monkeypatch.setattr(streaming, "_load_webui_prefill_context", lambda cfg: {
+        "status": "loaded",
+        "source": "test",
+        "label": "test",
+        "message_count": 2,
+        "messages": [
+            {"role": "assistant", "content": "prefill summary"},
+            {"role": "user", "content": "prefill"},
+        ],
+    })
     monkeypatch.setattr(streaming, "_prefill_messages_with_webui_context", lambda ctx, cfg: list(ctx["messages"]) + [{"role": "user", "content": "webui session context"}])
     monkeypatch.setattr(gateway_chat.urllib.request, "urlopen", fake_urlopen)
 
@@ -285,6 +331,7 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
     assert captured["headers"]["X-hermes-session-key"] == f"webui:{s.session_id}"
     assert '"stream": true' in captured["body"]
     payload = json.loads(captured["body"])
+    assert payload["reasoning_effort"] == "high"
     # #3324: the gateway path's first system message is now the full WebUI
     # ephemeral system prompt (progress prompt + session/delivery context),
     # NOT the bare _WEBUI_PROGRESS_PROMPT — otherwise the delivery/session
@@ -296,15 +343,17 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
     # The moved session/delivery context must be present in the system prompt.
     assert "Connected Platforms:" in system_msg["content"]
     assert "Delivery options for scheduled tasks:" in system_msg["content"]
-    # The recall prefill + the actual user turn follow the system message.
+    # The gateway path keeps safe recall prefill context while removing
+    # terminal user-role prefill before the actual browser user turn.
     assert [m["content"] for m in payload["messages"][1:]] == [
-        "prefill",
-        "webui session context",
+        "prefill summary",
         "Say hello",
     ]
+    assert [m["role"] for m in payload["messages"]] == ["system", "assistant", "user"]
     events = []
     while not subscriber.empty():
         events.append(subscriber.get_nowait())
+    event_pairs = [(item[0], item[1]) for item in events]
     assert ("tool", {
         "event_type": "tool.started",
         "name": "terminal",
@@ -312,7 +361,9 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
         "args": {},
         "is_error": False,
         "tid": "call-1",
-    }) in events
+    }) in event_pairs
+    assert ("reasoning", {"text": "Thinking from tool progress"}) in event_pairs
+    assert ("reasoning", {"text": "Reasoning preview"}) in event_pairs
     assert ("tool_complete", {
         "event_type": "tool.completed",
         "name": "terminal",
@@ -320,7 +371,194 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
         "args": {},
         "is_error": False,
         "tid": "call-1",
-    }) in events
+    }) in event_pairs
+    assert all(len(item) == 3 and item[2] for item in events)
+
+
+def test_gateway_chat_worker_preserves_reasoning_delta_whitespace_and_persists_reasoning(tmp_path, monkeypatch):
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def __iter__(self):
+            yield b'data: {"choices":[{"delta":{"content":"hel"}}]}\n\n'
+            yield b'event: hermes.tool.progress\n'
+            yield b'data: {"tool":"_thinking","text":"Let me"}\n\n'
+            yield b'event: reasoning.available\n'
+            yield b'data: {"text":" think", "preview":"should not win"}\n\n'
+            yield b'event: reasoning.available\n'
+            yield b'data: {"content":{"text":"safe","debug":{"note":"x"}}}\n\n'
+            yield b'event: reasoning.available\n'
+            yield b'data: {"preview":" more"}\n\n'
+            yield b'data: {"choices":[{"delta":{"content":"lo"}}]}\n\n'
+            yield b'data: [DONE]\n\n'
+
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://gateway.local")
+    monkeypatch.setattr(gateway_chat.urllib.request, "urlopen", lambda req, timeout=0: FakeResponse())
+
+    s = new_session()
+    stream_id = "stream-gateway-reasoning-persist-test"
+    s.active_stream_id = stream_id
+    s.pending_user_message = "Say hello"
+    s.pending_attachments = []
+    s.pending_started_at = 123
+    s.save()
+    channel = create_stream_channel()
+    subscriber = channel.subscribe()
+    STREAMS[stream_id] = channel
+
+    gateway_chat._run_gateway_chat_streaming(
+        s.session_id,
+        "Say hello",
+        "test-model",
+        str(tmp_path),
+        stream_id,
+        [],
+    )
+
+    saved = models.get_session(s.session_id)
+    assert saved.messages[-1]["content"] == "hello"
+    assert saved.messages[-1]["reasoning"] == "Let me think more"
+    reasoning_events = []
+    while not subscriber.empty():
+        item = subscriber.get_nowait()
+        if item[0] == "reasoning":
+            reasoning_events.append(item[1]["text"])
+    assert reasoning_events == ["Let me", " think", " more"]
+    assert not any("debug" in text for text in reasoning_events)
+
+
+def test_gateway_chat_worker_reads_reasoning_content_deltas_from_chat_completions(tmp_path, monkeypatch):
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def __iter__(self):
+            yield b'data: {"choices":[{"delta":{"reasoning_content":"Let me ","content":"hel"}}]}\n\n'
+            yield b'data: {"choices":[{"delta":{"reasoning_content":"think","content":"lo"}}]}\n\n'
+            yield b'data: [DONE]\n\n'
+
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://gateway.local")
+    monkeypatch.setattr(gateway_chat.urllib.request, "urlopen", lambda req, timeout=0: FakeResponse())
+
+    s = new_session()
+    stream_id = "stream-gateway-reasoning-content-test"
+    s.active_stream_id = stream_id
+    s.pending_user_message = "Say hello"
+    s.pending_attachments = []
+    s.pending_started_at = 123
+    s.save()
+    channel = create_stream_channel()
+    subscriber = channel.subscribe()
+    STREAMS[stream_id] = channel
+
+    gateway_chat._run_gateway_chat_streaming(
+        s.session_id,
+        "Say hello",
+        "test-model",
+        str(tmp_path),
+        stream_id,
+        [],
+    )
+
+    saved = models.get_session(s.session_id)
+    assert saved.messages[-1]["content"] == "hello"
+    assert saved.messages[-1]["reasoning"] == "Let me think"
+    reasoning_events = []
+    while not subscriber.empty():
+        item = subscriber.get_nowait()
+        if item[0] == "reasoning":
+            reasoning_events.append(item[1]["text"])
+    assert reasoning_events == ["Let me ", "think"]
+
+
+def test_gateway_chat_worker_normalizes_prefill_slice_before_system_prefix(tmp_path, monkeypatch):
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+
+    captured = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def __iter__(self):
+            yield b'data: {"choices":[{"delta":{"content":"done"}}]}\n\n'
+            yield b'data: [DONE]\n\n'
+
+    prefill_raw = [
+        {"role": "assistant", "content": "prefill summary"},
+        {"role": "user", "content": "first terminal user"},
+        {"role": "user", "content": "second terminal user"},
+    ]
+
+    def fake_urlopen(req, timeout=0):
+        captured["body"] = json.loads(req.data.decode("utf-8"))
+        return FakeResponse()
+
+    original_normalizer = streaming._normalize_prefill_messages_before_user_turn
+
+    def recording_normalizer(messages):
+        captured["normalizer_input"] = list(messages)
+        return original_normalizer(messages)
+
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://gateway.local")
+    monkeypatch.setattr(streaming, "_load_webui_prefill_context", lambda cfg: {
+        "status": "loaded",
+        "source": "test",
+        "label": "test",
+        "message_count": len(prefill_raw),
+        "messages": prefill_raw,
+    })
+    monkeypatch.setattr(streaming, "_prefill_messages_with_webui_context", lambda ctx, cfg: list(ctx["messages"]))
+    monkeypatch.setattr(streaming, "_normalize_prefill_messages_before_user_turn", recording_normalizer)
+    monkeypatch.setattr(gateway_chat.urllib.request, "urlopen", fake_urlopen)
+
+    s = new_session()
+    stream_id = "stream-gateway-prefill-slice-test"
+    s.active_stream_id = stream_id
+    s.pending_user_message = "Say hello"
+    s.pending_attachments = []
+    s.save()
+    STREAMS[stream_id] = create_stream_channel()
+
+    gateway_chat._run_gateway_chat_streaming(
+        s.session_id,
+        "Say hello",
+        "test-model",
+        str(tmp_path),
+        stream_id,
+        [],
+    )
+
+    assert captured["normalizer_input"] == prefill_raw
+    payload_messages = captured["body"]["messages"]
+    assert [m["role"] for m in payload_messages] == ["system", "assistant", "user"]
+    assert [m["content"] for m in payload_messages[1:]] == ["prefill summary", "Say hello"]
 
 
 def test_gateway_chat_worker_backfills_context_only_turns_into_display(tmp_path, monkeypatch):
@@ -583,7 +821,154 @@ def test_gateway_chat_worker_forwards_image_attachments_as_multimodal_parts(tmp_
     content = captured["body"]["messages"][-1]["content"]
     assert captured["body"]["messages"][0]["role"] == "system"
     assert "Final visible assistant replies" in captured["body"]["messages"][0]["content"]
-    assert captured["body"]["messages"][1] == {"role": "user", "content": "webui session context"}
+    image_payload = captured["body"]["messages"][1]
+    assert image_payload["role"] == "user"
+    assert image_payload["content"][0] == {"type": "text", "text": "What is in this image?"}
     assert content[0] == {"type": "text", "text": "What is in this image?"}
     assert content[1]["type"] == "image_url"
     assert content[1]["image_url"]["url"].startswith("data:image/png;base64,")
+
+
+def test_gateway_use_runs_api_is_default_off():
+    for env in ({}, {"HERMES_WEBUI_GATEWAY_USE_RUNS_API": ""}):
+        assert _gateway_use_runs_api_enabled({}, env) is False
+
+
+def test_gateway_use_runs_api_only_accepts_explicit_truthy_values():
+    for value in ("1", "true", "yes", "on", " True ", " ON "):
+        assert _gateway_use_runs_api_enabled({}, {"HERMES_WEBUI_GATEWAY_USE_RUNS_API": value}) is True
+
+
+def test_gateway_use_runs_api_rejects_generic_truthy_strings():
+    for value in ("enabled", "gateway", "api_server", "absolutely"):
+        assert _gateway_use_runs_api_enabled({}, {"HERMES_WEBUI_GATEWAY_USE_RUNS_API": value}) is False
+
+
+def test_gateway_use_runs_api_can_be_enabled_from_config():
+    assert _gateway_use_runs_api_enabled({"webui_gateway_use_runs_api": "true"}, {}) is True
+    assert _gateway_use_runs_api_enabled({"webui_gateway_use_runs_api": "1"}, {}) is True
+
+
+def test_gateway_use_runs_api_env_wins_over_config():
+    assert _gateway_use_runs_api_enabled(
+        {"webui_gateway_use_runs_api": "true"},
+        {"HERMES_WEBUI_GATEWAY_USE_RUNS_API": "false"},
+    ) is False
+
+
+def test_gateway_runs_api_body_includes_session_id():
+    """#4535: the runs API body must carry session_id so the agent reuses the
+    browser session instead of creating a fresh run_<uuid> per message."""
+    from unittest.mock import patch, MagicMock
+    from api.config import STREAMS, STREAMS_LOCK
+    from api.gateway_chat import _run_gateway_chat_streaming
+
+    captured = {}
+    events = []
+    q = MagicMock()
+    q.put_nowait = lambda item: events.append(item)
+    stream_id = "sid-runs-session-id"
+    with STREAMS_LOCK:
+        STREAMS[stream_id] = q
+
+    call_count = [0]
+
+    def fake_urlopen(req, *, timeout=None):
+        call_count[0] += 1
+        if call_count[0] == 1:
+            captured["body"] = json.loads(req.data.decode("utf-8"))
+            captured["url"] = req.full_url
+            resp = MagicMock()
+            resp.read = lambda sz=65536: json.dumps({"run_id": "run_abc"}).encode()
+            resp.__enter__ = lambda s: s
+            resp.__exit__ = lambda s, *a: None
+            return resp
+        resp = MagicMock()
+        resp.__iter__ = lambda s: iter([
+            b'data: {"choices":[{"delta":{"content":"ok"}}]}\n',
+            b'data: [DONE]\n',
+        ])
+        resp.__enter__ = lambda s: s
+        resp.__exit__ = lambda s, *a: None
+        return resp
+
+    import os
+    env = {k: v for k, v in os.environ.items()}
+    env["HERMES_WEBUI_CHAT_BACKEND"] = "gateway"
+    env["HERMES_WEBUI_GATEWAY_USE_RUNS_API"] = "1"
+    env["HERMES_WEBUI_GATEWAY_BASE_URL"] = "http://gateway.local"
+
+    try:
+        with patch.dict("os.environ", env, clear=True):
+            with patch("api.gateway_chat.gateway_supports_approval", return_value=True), \
+                 patch("urllib.request.urlopen", side_effect=fake_urlopen), \
+                 patch("api.gateway_chat.get_session", return_value=MagicMock(
+                     active_stream_id=stream_id, workspace="/tmp",
+                     profile=None, context_messages=[], messages=[],
+                 )):
+                _run_gateway_chat_streaming(
+                    session_id="sess-stable-uuid",
+                    msg_text="hi",
+                    model="test",
+                    workspace="/tmp",
+                    stream_id=stream_id,
+                )
+        assert "/v1/runs" in captured["url"]
+        assert captured["body"]["session_id"] == "sess-stable-uuid"
+    finally:
+        with STREAMS_LOCK:
+            STREAMS.pop(stream_id, None)
+
+
+def test_gateway_worker_skips_runs_api_when_opt_in_absent():
+    """Worker uses chat/completions even when gateway advertises approval support, unless opt-in is set."""
+    from unittest.mock import patch, MagicMock
+    from api.config import STREAMS, STREAMS_LOCK
+    from api.gateway_chat import _run_gateway_chat_streaming
+
+    events = []
+    q = MagicMock()
+    q.put_nowait = lambda item: events.append(item)
+    stream_id = "sid-optin-gate"
+    with STREAMS_LOCK:
+        STREAMS[stream_id] = q
+
+    sse_body = b'data: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: [DONE]\n\n'
+
+    def fake_urlopen(req, *, timeout=None):
+        assert "/v1/chat/completions" in req.full_url
+        resp = MagicMock()
+        resp.__iter__ = lambda s: iter(sse_body.split(b"\n"))
+        resp.__enter__ = lambda s: s
+        resp.__exit__ = lambda s, *a: None
+        return resp
+
+    import os
+    env_override = {"HERMES_WEBUI_CHAT_BACKEND": "gateway"}
+    env_without_opt_in = {
+        k: v for k, v in os.environ.items()
+        if k != "HERMES_WEBUI_GATEWAY_USE_RUNS_API"
+    }
+    env_without_opt_in.update(env_override)
+
+    try:
+        with patch.dict("os.environ", env_without_opt_in, clear=True):
+            with patch("api.gateway_chat.gateway_supports_approval", return_value=True), \
+                 patch("urllib.request.urlopen", side_effect=fake_urlopen), \
+                 patch("api.gateway_chat.get_session", return_value=MagicMock(
+                     active_stream_id=stream_id, workspace="/tmp",
+                     profile=None, context_messages=[], messages=[],
+                 )):
+                _run_gateway_chat_streaming(
+                    session_id="sess-optin",
+                    msg_text="hi",
+                    model="test",
+                    workspace="/tmp",
+                    stream_id=stream_id,
+                )
+        event_types = [e[0] for e in events if isinstance(e, tuple) and len(e) >= 2]
+        assert "token" in event_types, "expected a token event from chat/completions path"
+        assert "apperror" not in event_types, "runs API path fired unexpectedly"
+    finally:
+        with STREAMS_LOCK:
+            STREAMS.pop(stream_id, None)

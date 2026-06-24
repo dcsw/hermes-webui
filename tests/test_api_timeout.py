@@ -211,7 +211,7 @@ def test_update_flows_keep_explicit_longer_timeouts():
     """Legitimately long update flows should not inherit the generic 30s guard."""
     src = _source(UI_JS)
     panels = _source(PANELS_JS)
-    assert "api('/api/updates/check?force=1',{timeoutMs:60000})" in panels
+    assert "api('/api/updates/check',{method:'POST',body:JSON.stringify({force:true}),timeoutMs:60000})" in panels
     assert "api('/api/updates/summary',{method:'POST',body:JSON.stringify({updates:scopedUpdates,target:target||null}),timeoutMs:60000})" in src
     assert "api('/api/updates/apply',{method:'POST',body:JSON.stringify({target}),timeoutMs:120000})" in src
     assert "api('/api/updates/force',{method:'POST',body:JSON.stringify({target}),timeoutMs:120000})" in src
@@ -226,8 +226,8 @@ def test_passive_background_polls_suppress_timeout_toasts():
     panels = _source(PANELS_JS)
 
     assert "api('/api/client-events/log',{method:'POST',body:JSON.stringify(payload),timeoutMs:3000,timeoutToast:false})" in workspace
-    assert "api('/api/sessions' + allProfilesQS,{timeoutToast:false})" in sessions
-    assert "api('/api/projects' + allProfilesQS,{timeoutToast:false})" in sessions
+    assert "api('/api/sessions' + sessionListQS,{timeoutToast:false})" in sessions
+    assert "api('/api/projects' + projectQS,{timeoutToast:false})" in sessions
     assert "api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=0&resolve_model=0`,{timeoutToast:false})" in sessions
     assert 'api("/api/approval/pending?session_id=" + encodeURIComponent(sid),{timeoutToast:false})' in messages
     assert 'api("/api/clarify/pending?session_id=" + encodeURIComponent(sid),{timeoutToast:false})' in messages
