@@ -1,3 +1,10 @@
+# Node 22 LTS source stage, copied into the final image below. Pinned to the
+# same image/digest as hermes-agent-src/Dockerfile's node_source stage so
+# both containers run an identical, already-vetted Node build. Bookworm-based
+# slim image links against glibc 2.36, which runs cleanly on this image's
+# Debian 13 (trixie, glibc 2.41) base.
+FROM node:22-bookworm-slim@sha256:7af03b14a13c8cdd38e45058fd957bf00a72bbe17feac43b1c15a689c029c732 AS node_source
+
 FROM python:3.12-slim
 
 LABEL maintainer="nesquena"
@@ -65,6 +72,33 @@ USER root
 # Installing as root places uv in /usr/local/bin, available to all users.
 # The init script will skip the download when uv is already on PATH.
 RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh
+
+# Node 22 LTS + npm, copied from the node_source stage above (see that stage
+# for the version/digest rationale). npm and npx are recreated as symlinks
+# because they're symlinks in the source image.
+#
+# In the two-container compose setup, browser/run_python/etc. tool calls
+# initiated from the WebUI execute inside *this* container, not the agent
+# container (hermes-webui's architectural limitation #681 — see
+# hermes-webui-src/docs/docker.md). hermes-agent's `browser_*` tools shell
+# out to the `agent-browser` npm CLI regardless of CDP-vs-local mode
+# (tools/browser_tool.py), so without Node+npm+agent-browser here, every
+# WebUI-initiated browser tool call fails with "agent-browser CLI not
+# found" even though the agent container has it.
+COPY --chmod=0755 --from=node_source /usr/local/bin/node /usr/local/bin/
+COPY --from=node_source /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/npm
+RUN ln -sf /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm && \
+    ln -sf /usr/local/lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx
+
+# Pinned to the same version pulled by hermes-agent-src's package.json
+# (package-lock.json resolves agent-browser to 0.26.0) so both containers
+# drive the browser with identical CLI behavior. `npm install -g` (not
+# `npx`) so the binary is baked into the image and no internet access is
+# needed at runtime. Only the CLI is installed here, not `agent-browser
+# install` — that downloads a local Chromium, which isn't needed since the
+# WebUI always connects out to the chromium-playwright sidecar via
+# BROWSER_CDP_URL.
+RUN npm install -g agent-browser@0.26.0 && npm cache clean --force
 
 COPY --chown=root:root . /apptoo
 
