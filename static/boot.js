@@ -926,12 +926,12 @@ window._micPendingSend=window._micPendingSend||false;
 // handles selection, the dropdown option, and playback. Mirrors registerHermesSkin.
 //
 //   window.registerHermesTtsEngine({
-//     id: 'voicevox',            // [a-z0-9_-], not a built-in (browser/edge/elevenlabs)
+//     id: 'voicevox',            // [a-z0-9_-], not a built-in (browser/edge/elevenlabs/openai)
 //     label: 'VOICEVOX (local)',
 //     synthesize(text, opts) { return Promise<ArrayBuffer|Blob>; }
 //   }) -> true on success, false if rejected
 var _HERMES_TTS_ENGINES = Object.create(null);
-var _HERMES_TTS_RESERVED = { browser:1, edge:1, elevenlabs:1 };
+var _HERMES_TTS_RESERVED = { browser:1, edge:1, elevenlabs:1, openai:1 };
 function _hermesTtsValidId(id){ return typeof id==='string' && /^[a-z0-9][a-z0-9_-]{0,31}$/.test(id); }
 function _hermesAddTtsOption(id, label){
   var sel=document.getElementById('settingsTtsEngine');

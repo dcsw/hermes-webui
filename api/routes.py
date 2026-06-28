@@ -14764,6 +14764,57 @@ def _normalize_tts_prosody(value, *, unit: str) -> str | None:
     return None
 
 
+_TTS_PROXY_MAX_BYTES = 16 * 1024 * 1024
+_TTS_LOCALHOST_HOSTS = {"127.0.0.1", "::1", "localhost"}
+
+
+def _normalized_openai_tts_base_url(base_url: str) -> str:
+    from urllib.parse import urlsplit, urlunsplit
+
+    raw = str(base_url or "").strip()
+    parsed = urlsplit(raw)
+    hostname = (parsed.hostname or "").strip().lower()
+    if not parsed.scheme or not parsed.netloc or parsed.query or parsed.fragment:
+        raise ValueError("invalid OpenAI base_url in config")
+    if parsed.scheme == "https":
+        pass
+    elif parsed.scheme == "http" and hostname in _TTS_LOCALHOST_HOSTS:
+        pass
+    else:
+        raise ValueError("invalid OpenAI base_url in config")
+    path = parsed.path.rstrip("/") or ""
+    return urlunsplit((parsed.scheme, parsed.netloc, path, "", ""))
+
+
+def _buffer_tts_audio_response(resp, *, max_bytes: int | None = None) -> bytes:
+    if max_bytes is None:
+        max_bytes = _TTS_PROXY_MAX_BYTES
+    headers = getattr(resp, "headers", None)
+    content_type = ""
+    if headers is not None:
+        try:
+            content_type = str(headers.get("Content-Type") or "")
+        except Exception:
+            content_type = ""
+    if not content_type:
+        try:
+            info = resp.info()
+            content_type = str(info.get("Content-Type") or "")
+        except Exception:
+            content_type = ""
+    if content_type and not content_type.lower().startswith("audio/"):
+        raise ValueError("upstream returned non-audio content")
+    audio_data = bytearray()
+    while True:
+        chunk = resp.read(65536)
+        if not chunk:
+            break
+        audio_data.extend(chunk)
+        if len(audio_data) > max_bytes:
+            raise ValueError("upstream audio exceeded byte limit")
+    return bytes(audio_data)
+
+
 def _handle_tts(handler, parsed):
     """Generate TTS audio via supported server TTS engines. POST JSON body only.
 
@@ -14926,17 +14977,15 @@ def _handle_tts(handler, parsed):
         # Buffer the full response before sending first byte.
         # The streaming endpoint is designed for chunked delivery, but urllib's
         # chunked-read path adds per-chunk overhead that dominates short TTS
-        # payloads. With the 5000-char cap enforced above the buffer is bounded
-        # (a few MB of mp3 worst case), so full-buffer-then-send is faster in
-        # practice and simpler to reason about.
-        audio_data = b""
+        # payloads. A hard cap keeps the buffered path bounded even if the
+        # upstream misbehaves.
         try:
             with _urlopen(req, timeout=30) as resp:
-                while True:
-                    chunk = resp.read(65536)
-                    if not chunk:
-                        break
-                    audio_data += chunk
+                audio_data = _buffer_tts_audio_response(resp)
+        except ValueError:
+            logger.warning("ElevenLabs TTS rejected an invalid upstream response", exc_info=True)
+            from api.helpers import bad as _bad
+            return _bad(handler, "ElevenLabs TTS generation failed", 502)
         except Exception:
             logger.exception("ElevenLabs TTS generation failed")
             from api.helpers import bad as _bad
@@ -14970,9 +15019,7 @@ def _handle_tts(handler, parsed):
             from api.helpers import bad as _bad
             return _bad(handler, "OpenAI API key not configured", 503)
 
-        from urllib.parse import urlunsplit as _urlunsplit
-
-        base_url = _urlunsplit(("https", "api.openai.com", "/v1", "", ""))
+        base_url = "https://api.openai.com/v1"
         model = "gpt-4o-mini-tts"
         oai_voice = "alloy"
         try:
@@ -14981,9 +15028,16 @@ def _handle_tts(handler, parsed):
             if isinstance(tts_cfg, dict):
                 oai_cfg = tts_cfg.get("openai", {})
                 if isinstance(oai_cfg, dict):
-                    base_url = (oai_cfg.get("base_url") or base_url).rstrip("/")
+                    base_url = _normalized_openai_tts_base_url(oai_cfg.get("base_url") or base_url)
                     model = oai_cfg.get("model") or model
                     oai_voice = oai_cfg.get("voice") or oai_voice
+                else:
+                    base_url = _normalized_openai_tts_base_url(base_url)
+            else:
+                base_url = _normalized_openai_tts_base_url(base_url)
+        except ValueError:
+            from api.helpers import bad as _bad
+            return _bad(handler, "invalid OpenAI base_url in config", 400)
         except Exception:
             pass
 
@@ -15002,14 +15056,13 @@ def _handle_tts(handler, parsed):
             "Accept": "audio/mpeg",
         })
 
-        audio_data = b""
         try:
             with _urlopen(req, timeout=30) as resp:
-                while True:
-                    chunk = resp.read(65536)
-                    if not chunk:
-                        break
-                    audio_data += chunk
+                audio_data = _buffer_tts_audio_response(resp)
+        except ValueError:
+            logger.warning("OpenAI TTS rejected an invalid upstream response", exc_info=True)
+            from api.helpers import bad as _bad
+            return _bad(handler, "OpenAI TTS generation failed", 502)
         except Exception:
             logger.exception("OpenAI TTS generation failed")
             from api.helpers import bad as _bad

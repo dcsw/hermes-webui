@@ -39,8 +39,9 @@ class _FakeHandler:
 
 
 class _StreamOnceResponse:
-    def __init__(self, chunks):
+    def __init__(self, chunks, headers=None):
         self._chunks = list(chunks)
+        self.headers = headers or {}
 
     def __enter__(self):
         return self
@@ -148,6 +149,50 @@ def test_openai_tts_config_overrides(monkeypatch):
     assert h.status == 200
     assert captured["url"] == "https://custom.example.com/v1/audio/speech"
     assert captured["body"] == {"model": "tts-custom", "input": "Hello", "voice": "nova"}
+
+
+def test_openai_tts_rejects_invalid_base_url_config(monkeypatch):
+    import api.config as config
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai")
+    monkeypatch.setattr(config, "get_config", lambda: {
+        "tts": {"openai": {"base_url": "http://169.254.169.254/v1"}}
+    })
+    h = _post({"text": "Hello", "engine": "openai"}, client="10.82.0.5")
+    routes._handle_tts(h, None)
+
+    assert h.status == 400
+    assert "base_url" in (h.payload() or {}).get("error", "")
+
+
+def test_openai_tts_rejects_non_audio_upstream_response(monkeypatch):
+    def _fake_urlopen(_req, timeout=0):
+        return _StreamOnceResponse(
+            [b'{"error":"nope"}'],
+            headers={"Content-Type": "application/json"},
+        )
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai")
+    monkeypatch.setattr("urllib.request.urlopen", _fake_urlopen)
+    h = _post({"text": "Hello", "engine": "openai"}, client="10.82.0.6")
+    routes._handle_tts(h, None)
+
+    assert h.status == 502
+    assert "OpenAI TTS generation failed" in (h.payload() or {}).get("error", "")
+
+
+def test_openai_tts_rejects_oversized_upstream_audio(monkeypatch):
+    def _fake_urlopen(_req, timeout=0):
+        return _StreamOnceResponse([b"1234", b"5"], headers={"Content-Type": "audio/mpeg"})
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai")
+    monkeypatch.setattr(routes, "_TTS_PROXY_MAX_BYTES", 4)
+    monkeypatch.setattr("urllib.request.urlopen", _fake_urlopen)
+    h = _post({"text": "Hello", "engine": "openai"}, client="10.82.0.7")
+    routes._handle_tts(h, None)
+
+    assert h.status == 502
+    assert "OpenAI TTS generation failed" in (h.payload() or {}).get("error", "")
 
 
 def test_openai_option_in_html():
