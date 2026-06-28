@@ -1100,13 +1100,61 @@ def _cancelled_turn_hint(agent_name: str | None = None) -> str:
     return f'The run was cancelled by the user before {name} finished. No provider failure occurred.'
 
 
+def _provider_error_probe_text(value) -> tuple[str, int | None]:
+    """Flatten structured provider-error payloads into searchable text."""
+    _texts: list[str] = []
+    _status_code: int | None = None
+    _seen: set[int] = set()
+
+    def _walk(node):
+        nonlocal _status_code
+        if node is None:
+            return
+        if isinstance(node, (dict, list, tuple, set)):
+            _node_id = id(node)
+            if _node_id in _seen:
+                return
+            _seen.add(_node_id)
+        if isinstance(node, dict):
+            for _key in ('type', 'code', 'message', 'detail', 'details', 'name', 'status', 'status_code'):
+                _val = node.get(_key)
+                if _val is None:
+                    continue
+                if _key in ('status', 'status_code') and _status_code is None:
+                    try:
+                        _status_code = int(_val)
+                    except Exception:
+                        pass
+                _texts.append(str(_val))
+            for _key, _val in node.items():
+                if _key in ('type', 'code', 'message', 'detail', 'details', 'name', 'status', 'status_code'):
+                    continue
+                _walk(_val)
+            return
+        if isinstance(node, (list, tuple, set)):
+            for _item in node:
+                _walk(_item)
+            return
+        _texts.append(str(node))
+
+    _walk(value)
+    return ' '.join(t for t in _texts if t).strip(), _status_code
+
+
 def _classify_provider_error(err_str: str, exc=None, *, silent_failure: bool = False) -> dict:
     """Classify provider/agent failure text for WebUI apperror UX.
 
     Keep this string-based until hermes-agent exposes stable structured
     provider error classes for Codex OAuth plan limits.
     """
-    err_str = str(err_str or '')
+    _probe_text, _probe_status_code = _provider_error_probe_text(err_str)
+    if exc is not None:
+        _exc_probe_text, _exc_status_code = _provider_error_probe_text(exc)
+        if _exc_probe_text:
+            _probe_text = f"{_probe_text} {_exc_probe_text}".strip()
+        if _probe_status_code is None:
+            _probe_status_code = _exc_status_code
+    err_str = str(_probe_text or err_str or '')
     _err_lower = err_str.lower()
     _exc_name = type(exc).__name__ if exc is not None else ''
     _is_cancelled = (
@@ -1147,6 +1195,8 @@ def _classify_provider_error(err_str: str, exc=None, *, silent_failure: bool = F
     _is_quota = _is_quota_error_text(err_str)
     _is_auth = (
         not _is_quota and (
+            _probe_status_code == 401
+            or
             '401' in err_str
             or (exc is not None and 'AuthenticationError' in _exc_name)
             or 'authentication' in _err_lower
@@ -5056,6 +5106,18 @@ def _session_lacks_final_assistant_answer(messages) -> bool:
     return True
 
 
+def _merged_transcript_lacks_final_assistant_answer(previous_display, previous_context, result_messages, msg_text, source: str = "webui") -> bool:
+    """Return True when the saved display transcript would still lack a final answer."""
+    merged_messages = _merge_display_messages_after_agent_result(
+        previous_display,
+        previous_context,
+        _restore_reasoning_metadata(previous_display, result_messages),
+        msg_text,
+        source=source,
+    )
+    return _session_lacks_final_assistant_answer(merged_messages)
+
+
 def _agent_result_terminal_failure(result) -> bool:
     """Return True for agent results that must not be finalized as done."""
     if not isinstance(result, dict):
@@ -7973,8 +8035,27 @@ def _run_agent_streaming(
                     _previous_context_messages,
                     msg_text,
                 )
+                _last_err = getattr(agent, '_last_error', None) or result.get('error') or ''
+                _classification = _classify_provider_error(
+                    _last_err,
+                    _last_err,
+                    silent_failure=not bool(_last_err),
+                )
+                _is_quota = _classification['type'] == 'quota_exhausted'
+                _is_auth = _classification['type'] == 'auth_mismatch'
+                _saved_transcript_lacks_final_answer = _merged_transcript_lacks_final_assistant_answer(
+                    _previous_messages,
+                    _previous_context_messages,
+                    _all_result_messages,
+                    msg_text,
+                    source=getattr(s, 'pending_user_source', None) or 'webui',
+                )
                 _terminal_failure = (
                     _agent_result_terminal_failure(result)
+                    or (
+                        _is_auth
+                        and _saved_transcript_lacks_final_answer
+                    )
                     or (
                         _tool_limit_reached
                         and _session_lacks_final_assistant_answer(_all_result_messages)
@@ -8007,15 +8088,7 @@ def _run_agent_streaming(
                                 logger.debug("Failed to append cancelled turn journal event", exc_info=True)
                         put('cancel', _cancel_event_payload('Cancelled by user'))
                         return
-                    _last_err = getattr(agent, '_last_error', None) or result.get('error') or ''
                     _err_str = str(_last_err) if _last_err else ''
-                    _classification = _classify_provider_error(
-                        _err_str,
-                        _last_err,
-                        silent_failure=not bool(_err_str),
-                    )
-                    _is_quota = _classification['type'] == 'quota_exhausted'
-                    _is_auth = _classification['type'] == 'auth_mismatch'
                     if _is_quota:
                         _err_label = _classification['label']
                         _err_type = _classification['type']
