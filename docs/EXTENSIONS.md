@@ -316,6 +316,60 @@ For shared or remotely exposed installations:
 - prefer small, auditable extension files
 - avoid serving generated or user-writable directories as extension roots
 
+## Registering a custom theme (skin)
+
+Extensions can contribute a custom **skin** that appears in the native
+**Settings → Appearance** skin picker, instead of bolting on a parallel theme
+switcher. Call `window.registerHermesSkin(descriptor)` from your extension
+script:
+
+```javascript
+window.registerHermesSkin({
+  name: 'E-Ink',            // display name (also the picker label)
+  value: 'e-ink',           // optional stable key; slugified from name if omitted
+  label: 'E-Ink',           // optional explicit picker label
+  colors: ['#000000', '#ffffff', '#555555'],  // up to 3 preview swatches
+  tokens: {                 // CSS design-token overrides for this skin
+    '--bg': '#ffffff',
+    '--surface': '#ffffff',
+    '--text': '#000000',
+    '--accent': '#000000',
+    '--border': '#000000'
+    // ...any of the allowed tokens below
+  }
+});
+```
+
+The call returns `true` on success and `false` if the descriptor was rejected
+(so an extension can detect and log a bad theme). Once registered, the skin
+shows up in the picker, can be selected, and persists across reloads exactly
+like a built-in skin. Registering the same key again updates it in place
+(idempotent), which is what a live theme editor relies on while the user edits.
+
+**Core does the security-sensitive work for you.** Because token values are
+written into CSS, every value is sanitized in core, once, so every theme
+extension inherits the guard:
+
+- **Allowed token names** (anything else is dropped): `--bg`, `--surface`,
+  `--surface2`, `--surface-subtle`, `--text`, `--text2`, `--muted`, `--accent`,
+  `--accent2`, `--accent3`, `--accent-contrast`, `--accent-hover`,
+  `--accent-text`, `--accent-bg`, `--accent-bg-strong`, `--accent-rgb`,
+  `--border`, `--border2`, `--hover-bg`, `--code-bg`, `--code-text`,
+  `--sidebar`, `--sidebar-text`, `--user-bubble`, `--assistant-bubble`,
+  `--success`, `--warning`, `--danger`, `--info`, `--link`.
+- **Allowed value shapes** (anything else is dropped): hex colors, `rgb()` /
+  `rgba()`, `hsl()` / `hsla()`, CSS color keywords, simple numeric-with-unit
+  values (`px`/`em`/`rem`/`%`), and a bare RGB triple (e.g. `0, 0, 0` for
+  `--accent-rgb`, which the app consumes inside `rgba(...)`). Values containing
+  `url()`, `expression()`, semicolons, braces, or other CSS-injection vectors
+  are rejected.
+- **Reserved keys are protected** — an extension cannot overwrite a built-in
+  skin key (e.g. `default`, `ares`, `graphite`).
+- A descriptor with no valid tokens after sanitization is rejected entirely.
+
+This is the supported, forward-looking way for theme-pack and theme-creator
+extensions to integrate with the built-in appearance system.
+
 ## Extension authoring guidance
 
 Extensions share the page with the WebUI app, so they should be additive and
