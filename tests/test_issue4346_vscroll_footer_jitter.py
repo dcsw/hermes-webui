@@ -1773,13 +1773,19 @@ console.log(JSON.stringify({
         session_id_needle = json.dumps(
             "currentAssistantTurn.dataset.sessionId=S.session.session_id"
         )
-        transparent_collapse_needle = json.dumps(
-            "recycled.removeAttribute('data-transparent-turn-collapsed')"
+        recycle_reset_loop_needle = json.dumps(
+            "for(const attr of _recycleResetAttrs) recycled.removeAttribute(attr);"
+        )
+        transparent_collapse_attr_needle = json.dumps(
+            "'data-transparent-turn-collapsed'"
         )
         source = (
             _extract_func_script(JS)
             + """
 const fn = extractFunc('renderMessages');
+const resetAttrsStart = src.indexOf('const _recycleResetAttrs=');
+const resetAttrsEnd = src.indexOf('let _scrollbarDragActive=false;', resetAttrsStart);
+const resetAttrs = src.slice(resetAttrsStart, resetAttrsEnd);
 const assistantStart = fn.indexOf('if(!currentAssistantTurn){');
 const assistantEnd = fn.indexOf('const seg=document.createElement', assistantStart);
 const assistantBranch = fn.slice(assistantStart, assistantEnd);
@@ -1791,7 +1797,10 @@ console.log(JSON.stringify({
             + session_id_needle
             + """),
   clears_transparent_collapse: assistantBranch.includes("""
-            + transparent_collapse_needle
+            + recycle_reset_loop_needle
+            + """),
+  reset_list_contains_transparent_collapse: resetAttrs.includes("""
+            + transparent_collapse_attr_needle
             + """),
 }));
 """
@@ -1802,7 +1811,9 @@ console.log(JSON.stringify({
         assert out["refreshes_session_id"] is True, \
             "recycled assistant turns must refresh the session id"
         assert out["clears_transparent_collapse"] is True, \
-            "recycled assistant turns must clear stale transparent collapse state"
+            "recycled assistant turns must clear stale attrs through the recycle reset loop"
+        assert out["reset_list_contains_transparent_collapse"] is True, \
+            "the recycle reset list must keep clearing transparent collapse state"
 
 
 class TestStashKeyCoercion:
