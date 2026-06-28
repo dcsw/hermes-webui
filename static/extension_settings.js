@@ -143,15 +143,21 @@
     }
   }
 
-  function safeRead(key){
+  function safeReadState(key){
     try{
       const raw=window.localStorage.getItem(key);
-      if(!raw) return {};
+      if(!raw) return {value:{},malformed:false};
       const parsed=JSON.parse(raw);
-      return parsed&&typeof parsed==='object'&&!Array.isArray(parsed)?parsed:{};
+      return parsed&&typeof parsed==='object'&&!Array.isArray(parsed)
+        ?{value:parsed,malformed:false}
+        :{value:{},malformed:true};
     }catch(_e){
-      return {};
+      return {value:{},malformed:true};
     }
+  }
+
+  function safeRead(key){
+    return safeReadState(key).value;
   }
 
   function safeWrite(key,value){
@@ -211,10 +217,10 @@
   }
 
   function readSettingsState(schema,key){
-    const stored=safeRead(key);
-    const checked=validate(schema,stored);
+    const stored=safeReadState(key);
+    const checked=validate(schema,stored.value);
     const overrides=overridesFromValues(schema,checked.values);
-    if(JSON.stringify(stored)!==JSON.stringify(overrides)) safeWrite(key,overrides);
+    if(stored.malformed||JSON.stringify(stored.value)!==JSON.stringify(overrides)) safeWrite(key,overrides);
     return {values:checked.values,overrides};
   }
 
