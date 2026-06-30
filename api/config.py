@@ -14,6 +14,7 @@ import copy
 import hashlib
 import json
 import logging
+import math
 import os
 import queue
 import re
@@ -7864,6 +7865,7 @@ _SETTINGS_DEFAULTS = {
     "busy_input_mode": "queue",  # behavior when sending while agent is running: queue | interrupt | steer
     "password_hash": None,  # PBKDF2-HMAC-SHA256 hash; None = auth disabled
     "auth_disabled_acknowledged": False,  # user acknowledged unauthenticated risk
+    "provider_cost_budget": None,
 }
 _SETTINGS_LEGACY_DROP_KEYS = {
     "assistant_language",
@@ -8095,6 +8097,17 @@ _SETTINGS_WRITE_VERSION = 0
 _SETTINGS_WRITE_LOCK = __import__("threading").Lock()
 
 
+def _coerce_provider_cost_budget(value: Any) -> float | None:
+    """Normalize a monthly budget to the persisted two-decimal representation."""
+    try:
+        rounded = round(float(value), 2)
+    except (TypeError, ValueError):
+        return None
+    if not (0 < rounded < 1e9) or not math.isfinite(rounded):
+        return None
+    return rounded
+
+
 def save_settings(settings: dict) -> dict:
     """Save settings to disk. Returns the merged settings. Ignores unknown keys."""
     current = load_settings()
@@ -8182,6 +8195,15 @@ def save_settings(settings: dict) -> dict:
                     seen.add(s)
                     cleaned.append(s)
                 v = cleaned
+            if k == "provider_cost_budget":
+                if v is None or v == "":
+                    current[k] = None
+                    continue
+                budget = _coerce_provider_cost_budget(v)
+                if budget is None:
+                    continue
+                current[k] = budget
+                continue
             # Coerce bool keys
             if k in _SETTINGS_BOOL_KEYS:
                 v = bool(v)

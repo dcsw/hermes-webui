@@ -9816,7 +9816,13 @@ async function renderProviderCostChart(card){
   }
   const body=card.querySelector('.provider-quota-body');
   if(!body||body.querySelector('.provider-cost-chart-wrap')) return;
-  if(!history||history.ok===false) return;
+  if(!history||history.ok===false){
+    const wrap=document.createElement('div');
+    wrap.className='provider-cost-chart-wrap';
+    _attachBudgetControls(wrap,history||{},card,0);
+    body.appendChild(wrap);
+    return;
+  }
   const snaps=Array.isArray(history.snapshots)?history.snapshots:[];
   // need at least 2 snapshots to have one non-null delta
   const hasData=snaps.filter(s=>s.delta!=null).length>=1;
@@ -9825,12 +9831,14 @@ async function renderProviderCostChart(card){
     empty.className='provider-cost-chart-wrap';
     empty.innerHTML='<div class="provider-cost-chart-title">7-day spend</div><div class="provider-quota-message">Not enough data yet. Cost chart builds after 2 daily snapshots.</div>';
     body.appendChild(empty);
+    _attachBudgetControls(empty,history,card,0);
     return;
   }
   const maxDelta=Math.max(...snaps.map(s=>s.delta!=null?Number(s.delta):0),1e-9);
   const nonNull=snaps.filter(s=>s.delta!=null).map(s=>Number(s.delta));
   const avg=nonNull.length?nonNull.reduce((a,b)=>a+b,0)/nonNull.length:0;
-  const pace='$'+(avg*30).toFixed(2);
+  const paceNum=avg*30;
+  const pace='$'+paceNum.toFixed(2);
   const bars=snaps.map(s=>{
     const delta=s.delta!=null?Number(s.delta):null;
     const pct=delta!=null?Math.max((delta/maxDelta)*100,delta>0?2:0).toFixed(1):'0';
@@ -9841,7 +9849,103 @@ async function renderProviderCostChart(card){
   const wrap=document.createElement('div');
   wrap.className='provider-cost-chart-wrap';
   wrap.innerHTML=`<div class="provider-cost-chart-title">7-day spend <span class="provider-cost-chart-pace">Monthly pace: ${esc(pace)}</span></div><div class="provider-cost-chart-bars insights-daily-token-chart">${bars}</div>`;
+  const monthly_budget=history&&history.monthly_budget!=null?history.monthly_budget:null;
+  if(monthly_budget!=null&&paceNum>0){
+    const paceSpan=wrap.querySelector('.provider-cost-chart-pace');
+    if(paceSpan){
+      const pct=Math.round((paceNum/monthly_budget)*100);
+      const pctSpan=document.createElement('span');
+      pctSpan.className='provider-cost-chart-pct'+(pct>=100?' over':pct>=80?' warn':'');
+      pctSpan.textContent=`(${pct}%)`;
+      paceSpan.appendChild(pctSpan);
+    }
+  }
   body.appendChild(wrap);
+  _attachBudgetControls(wrap,history,card,paceNum);
+}
+
+function _attachBudgetControls(wrap,history,card,paceNum){
+  const budget=history&&history.monthly_budget!=null?Number(history.monthly_budget):null;
+  const row=document.createElement('div');
+  row.className='provider-cost-budget-row';
+
+  const titleDiv=document.createElement('div');
+  titleDiv.className='provider-cost-budget-title';
+  titleDiv.textContent=t('provider_cost_budget_label');
+  row.appendChild(titleDiv);
+
+  const inputGroup=document.createElement('div');
+  inputGroup.className='provider-cost-budget-input-group';
+
+  const prefix=document.createElement('span');
+  prefix.className='provider-cost-budget-prefix';
+  prefix.textContent='$';
+  inputGroup.appendChild(prefix);
+
+  const input=document.createElement('input');
+  input.type='number';
+  input.min='0.01';
+  input.step='0.01';
+  input.className='provider-cost-budget-input';
+  input.placeholder=t('provider_cost_budget_placeholder')||'e.g. 50.00';
+  if(budget!=null) input.value=budget.toFixed(2);
+  inputGroup.appendChild(input);
+
+  const setBtn=document.createElement('button');
+  setBtn.type='button';
+  setBtn.className='provider-cost-budget-set';
+  setBtn.textContent=t('provider_cost_budget_set');
+  inputGroup.appendChild(setBtn);
+
+  const clearBtn=document.createElement('button');
+  clearBtn.type='button';
+  clearBtn.className='provider-cost-budget-clear';
+  clearBtn.textContent=t('provider_cost_budget_clear');
+  if(budget==null) clearBtn.style.display='none';
+  inputGroup.appendChild(clearBtn);
+
+  row.appendChild(inputGroup);
+
+  if(budget!=null&&paceNum>0){
+    const pct=Math.round((paceNum/budget)*100);
+    const barWrap=document.createElement('div');
+    barWrap.className='provider-cost-budget-bar-wrap';
+    const bar=document.createElement('div');
+    bar.className='provider-cost-budget-bar';
+    const fill=document.createElement('div');
+    fill.className='provider-cost-budget-bar-fill'+(pct>=100?' over':pct>=80?' warn':'');
+    fill.style.width=Math.min(100,pct)+'%';
+    bar.appendChild(fill);
+    barWrap.appendChild(bar);
+    const pctLabel=document.createElement('span');
+    pctLabel.className='provider-cost-budget-pct-label';
+    pctLabel.textContent=t('provider_cost_budget_pct',pct,budget.toFixed(2));
+    barWrap.appendChild(pctLabel);
+    row.appendChild(barWrap);
+  }
+
+  wrap.appendChild(row);
+
+  async function _saveBudget(value){
+    try{
+      await api('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({provider_cost_budget:value})});
+      const existing=card.querySelector('.provider-cost-chart-wrap');
+      if(existing) existing.remove();
+      renderProviderCostChart(card);
+    }catch(e){
+      if(typeof showToast==='function') showToast(t('provider_cost_budget_save_failed'));
+    }
+  }
+
+  setBtn.addEventListener('click',()=>{
+    const val=parseFloat(input.value);
+    if(!isFinite(val)||val<=0) return;
+    _saveBudget(val);
+  });
+
+  clearBtn.addEventListener('click',()=>{
+    _saveBudget(null);
+  });
 }
 
 function _buildProviderCard(p){
