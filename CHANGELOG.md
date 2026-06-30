@@ -35,6 +35,8 @@
 
 ### Fixed
 
+- **Mobile approval dialog and touch targets are easier to tap.** At mobile width the approval card's action buttons now lay out as a clean 2-column grid (Allow once / Allow session / Always allow / Deny) with the "Skip all this session" YOLO button full-width below, every button at a 44px minimum touch target; the titlebar new-chat/reload and the mobile sidebar-close controls are also bumped to 44px. Mobile-scoped (inside the mobile media query) — desktop layout is unchanged. Thanks @disco32r. (#5019)
+
 - **`/pet` now works in the WebUI, handing off to the Desktop Companion extension.** Typing `/pet` (and its subcommands) is intercepted client-side and routed to the petdex companion extension with graceful per-stage guidance when the extension isn't installed; the command output is XSS-safe. Thanks @rodboev. (#5168, #4843)
 - **Settings search results are now ranked by match source.** Results are ordered title/label > value/option > description, with a stable prefix + earlier-index tie-break, and the result cap is applied after ranking so the best matches are never dropped; supplemental and provider/plugin-card terms remain searchable (reorder-only). XSS-safe. Thanks @rodboev. (#5211, #5149)
 
