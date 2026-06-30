@@ -1952,7 +1952,7 @@ if(window.visualViewport){
   };
 })();
 
-// ── Appearance helpers (theme = light/dark/system, skin = accent color) ──────
+// ── Appearance helpers (theme = light/dark/system, skin = palette/accent) ────
 const _THEMES=[
   {name:'Light', value:'light', colors:['#FEFCF7','#FAF7F0','#B8860B']},
   {name:'Dark', value:'dark', colors:['#0D0D1A','#141425','#FFD700']},
@@ -1990,6 +1990,7 @@ const _LEGACY_THEME_MAP={
 };
 let _systemThemeMq=null;
 let _onSystemThemeChange=null;
+let _resolvedThemeBaseDark=false;
 
 function _normalizeAppearance(theme,skin){
   const rawTheme=typeof theme==='string'?theme.trim().toLowerCase():'';
@@ -2027,11 +2028,36 @@ function _syncThemeColorMeta(){
   }catch(e){}
 }
 
+function _skinKey(skin){
+  return (skin&&String(skin.value||skin.name||'').toLowerCase())||'';
+}
+
+function _findSkinEntry(key){
+  const normalized=String(key||'default').toLowerCase();
+  return (_SKINS||[]).find(s=>_skinKey(s)===normalized)||null;
+}
+
+function _activeSkinScheme(){
+  const key=(document.documentElement.dataset.skin||'default').toLowerCase();
+  const skin=_findSkinEntry(key);
+  const scheme=skin&&skin._extScheme;
+  return scheme==='light'||scheme==='dark'?scheme:'';
+}
+
+function _effectiveThemeDark(baseIsDark){
+  const skinScheme=_activeSkinScheme();
+  if(skinScheme==='dark') return true;
+  if(skinScheme==='light') return false;
+  return !!baseIsDark;
+}
+
 function _setResolvedTheme(isDark){
-  document.documentElement.classList.toggle('dark',!!isDark);
+  _resolvedThemeBaseDark=!!isDark;
+  const effectiveDark=_effectiveThemeDark(_resolvedThemeBaseDark);
+  document.documentElement.classList.toggle('dark',effectiveDark);
   const link=document.getElementById('prism-theme');
   if(!link){ _syncThemeColorMeta(); return; }
-  const want=isDark
+  const want=effectiveDark
     ?'https://cdn.jsdelivr.net/npm/prismjs@1.29.0/themes/prism-tomorrow.min.css'
     :'https://cdn.jsdelivr.net/npm/prismjs@1.29.0/themes/prism.min.css';
   // No SRI integrity on theme CSS — jsdelivr edge nodes serve different
@@ -2062,7 +2088,7 @@ function _applySkin(name){
   const key=(name||'default').toLowerCase();
   if(key==='default') delete document.documentElement.dataset.skin;
   else document.documentElement.dataset.skin=key;
-  _syncThemeColorMeta();
+  _setResolvedTheme(_resolvedThemeBaseDark);
 }
 
 function _pickTheme(name){
@@ -2200,6 +2226,11 @@ const _ALLOWED_SKIN_TOKENS=new Set([
 // with url(), expression(), semicolons, braces, or other CSS-injection vectors.
 const _SAFE_SKIN_VALUE_RE=/^(#(?:[0-9a-fA-F]{3,8})|rg(?:b|ba)\(\s*[0-9.,%\s/]+\)|hsl(?:a)?\(\s*[0-9.,%\s/deg]+\)|[0-9]{1,3}\s*,\s*[0-9]{1,3}\s*,\s*[0-9]{1,3}|[a-zA-Z]{3,20}|[0-9.]+(?:px|em|rem|%)?)$/;
 
+function _sanitizeSkinScheme(scheme){
+  const value=String(scheme||'').trim().toLowerCase();
+  return value==='light'||value==='dark'?value:'';
+}
+
 function _sanitizeSkinTokens(tokens){
   const out={};
   if(!tokens||typeof tokens!=='object') return out;
@@ -2244,12 +2275,13 @@ function registerHermesSkin(descriptor){
     if(_RESERVED_SKIN_KEYS.has(key)) return false;        // never shadow a core skin
     const tokens=_sanitizeSkinTokens(descriptor.tokens);
     if(Object.keys(tokens).length===0) return false;      // nothing valid to apply
+    const scheme=_sanitizeSkinScheme(descriptor.scheme);
     // 3 swatch colors for the picker (sanitized); fall back to accent/bg/text.
     let colors=Array.isArray(descriptor.colors)?descriptor.colors.slice(0,3):[];
     colors=colors.map(c=>String(c).trim()).filter(c=>_SAFE_SKIN_VALUE_RE.test(c));
     while(colors.length<3) colors.push(tokens['--accent']||tokens['--bg']||tokens['--text']||'#888');
     const label=String(descriptor.label||name).slice(0,40);
-    const entry={name:name.slice(0,40),value:key,label,colors,_extToken:tokens,_extension:true};
+    const entry={name:name.slice(0,40),value:key,label,colors,_extToken:tokens,_extScheme:scheme,_extension:true};
 
     const existingIdx=_SKINS.findIndex(s=>(s.value||s.name).toLowerCase()===key);
     if(existingIdx>=0&&_EXT_SKIN_KEYS.has(key)){
