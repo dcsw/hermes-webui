@@ -1703,6 +1703,7 @@ _PROVIDER_MODELS = {
         {"id": "gemini-3.5-flash", "label": "Gemini 3.5 Flash"},
         {"id": "gemini-2.5-pro", "label": "Gemini 2.5 Pro"},
         {"id": "mai-code-1-flash-picker", "label": "MAI Code 1 Flash"},
+        {"id": "gpt-4o", "label": "GPT-4o"},
     ],
     # Cursor ACP — models served via Cursor CLI agent acp
     "cursor-acp": [
