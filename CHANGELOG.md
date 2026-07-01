@@ -3,7 +3,15 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Push-to-talk hold gesture for dictation.** Hold the mic button (or its keyboard activation) to dictate and release to stop, in addition to the existing click-to-toggle mode — a more reliable way to capture a quick voice note. The browser-reserved `Ctrl+Shift+D` chord that an earlier draft proposed was dropped (it collides with browser bookmark shortcuts); only the page-safe hold gesture ships, and the restart/teardown paths are race-hardened so there's no stuck or zombie microphone. Thanks @rodboev. (#5310, #3700)
+
 ### Fixed
+
+- **MoA (Mixture-of-Agents) overrides fail closed on gateway-backed sessions instead of silently running the wrong model.** When WebUI chat is routed through a Hermes Gateway, a per-turn MoA override can't be honored gateway-side, so the request now returns an honest `409` ("MoA override is unavailable on gateway-backed sessions") rather than quietly dropping the override and running the base model. The non-gateway MoA path is unchanged. Thanks @ruizanthony. (#5153)
+
+- **`ctl.sh` loads `~/.hermes/.env` so `${VAR}` references in `config.yaml` resolve.** The control script now reads the environment file before launching, using a literal parser (no `source`/`eval`, so it's injection-safe) that correctly handles quoted values, inline comments, and `export`-prefixed lines. Thanks @hogehou-cmi. (#5309)
 
 - **Manual title regeneration honors your configured auxiliary title-generation timeout.** The manual "regenerate title" action used the frontend's default 30s request timeout, so a slow-but-valid generation timed out on the client when `auxiliary.title_generation.timeout` was set higher. It now fetches the current timeout fresh per regen (no stale cache across profile switches) and applies it only when valid, falling back to the 30s default on any fetch failure. Thanks @Stacey2911. (#5374)
 
