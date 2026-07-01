@@ -9,6 +9,8 @@ _No unreleased changes. Entries are moved into their version block when a releas
 
 ### Fixed
 
+- **Silent server crashes now leave a diagnostic instead of vanishing.** Enabled `faulthandler` and installed thread/main-thread exception hooks plus an exit audit, so an uncaught handler-thread exception or a native fault is logged with a traceback rather than the process disappearing with no trace (previously a ~9-16h silent exit). Diagnostic hardening; stdlib-only, startup-only, no request-path change. (#4633)
+
 - **Internal verification-stop nudge no longer leaks into the transcript.** The Hermes Agent's internal verify-before-finish loop appends synthetic scaffolding turns (a "premature done" answer + a `[System: ...verification evidence...]` nudge) flagged with structured markers. WebUI now honors those markers (`_verification_stop_synthetic` / `_pre_verify_synthetic`) and drops the scaffolding turns from the visible transcript instead of rendering them as real user/assistant messages. (#5334)
 
 - **Delegated subagent sessions no longer vanish from the sidebar.** A subagent (delegate_task) child whose sidebar row was built from a stale sidecar reporting 0 messages now receives its real message count from the agent state.db, so it stays visible (nested under its parent) instead of being silently dropped by the sidebar visibility filter. (#5308)
