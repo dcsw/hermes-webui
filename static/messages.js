@@ -3508,6 +3508,54 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     },null);
     return _findAnchorActivityEventByLocalId(localId,'token');
   }
+  // Persistent incremental renderer for anchor-scene live prose rows. The compact
+  // worklog re-renders the whole scene each frame; rendering the growing prose via
+  // renderMd(fullText) every frame is O(n^2) over a long answer. Instead keep a
+  // per-segment smd parser + node (the SAME safe renderer as the main live body)
+  // and feed only the delta, then hand the persistent node back to the ui.js scene
+  // builder. Returns null whenever smd or a stable key is unavailable so the caller
+  // falls back to the full renderMd path — identical structure, just not
+  // incremental. (#5455 WS2.1)
+  const _anchorProseSmdCache = new Map();
+  function _anchorProseIncrementalNode(key, text){
+    if(!window.smd || !key || typeof _safeSmdRenderer!=='function') return null;
+    const value=String(text||'');
+    try{
+      let st=_anchorProseSmdCache.get(key);
+      // Self-heal desyncs (edit/sanitize made the text no longer a pure append):
+      // rebuild the parser+node from scratch, mirroring _smdWrite's guard.
+      if(st && st.writtenText && !value.startsWith(st.writtenText)) st=null;
+      if(!st){
+        const node=document.createElement('div');
+        node.className='assistant-segment';
+        node.setAttribute('data-anchor-scene-prose','1');
+        const body=document.createElement('div');
+        body.className='msg-body';
+        node.appendChild(body);
+        const baseRenderer=_safeSmdRenderer(body);
+        const renderer=_smdRendererWithoutUnderscoreEmphasis(baseRenderer);
+        st={node,parser:window.smd.parser(renderer),writtenText:''};
+        _anchorProseSmdCache.set(key,st);
+        // Bound memory across turns: keys embed the stream id, so stale entries
+        // from finished streams age out here.
+        if(_anchorProseSmdCache.size>32){
+          const oldest=_anchorProseSmdCache.keys().next().value;
+          if(oldest!==key) _anchorProseSmdCache.delete(oldest);
+        }
+      }
+      const delta=value.slice(st.writtenText.length);
+      if(delta){
+        window.smd.parser_write(st.parser,delta);
+        st.writtenText=value;
+      }
+      st.node.dataset.rawText=value;
+      return st.node;
+    }catch(_){
+      _anchorProseSmdCache.delete(key);
+      return null;
+    }
+  }
+  window.__anchorProseIncrementalNode=_anchorProseIncrementalNode;
   function _anchorHasReasoningEvents(){
     const events=_anchorActivityEvents();
     return !!(events&&events.some(event=>event&&event.source_event_type==='reasoning'));
