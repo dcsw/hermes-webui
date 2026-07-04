@@ -6,17 +6,24 @@ import pytest
 class TestIssue4536ServiceTier:
     @pytest.fixture(autouse=True)
     def _isolate_config_globals(self):
-        """Make these tests hermetic against a leaked `config.cfg` rebind.
+        """Make these tests hermetic against leaked module-global config caches.
 
-        get_auxiliary_models() reads the module-global `config.cfg` after
-        reload_config() refreshes `_cfg_cache`. If an EARLIER test in the full
-        suite rebound `config.cfg` to its own dict via monkeypatch and its
-        teardown left `cfg is not _cfg_cache`, then `_cfg_has_in_memory_overrides()`
-        stays True and get_auxiliary_models() reads that stale dict instead of the
-        freshly-reloaded temp config — the root cause of this test's full-suite-only
-        flake (passes in isolation). Re-alias `cfg` to the live cache and clear the
-        override fingerprint before AND after, so neither an inherited leak nor our
-        own run can poison a neighbor.
+        Two shared caches in api.config can serve a PRIOR test's config into this
+        one, causing a full-suite-only flake (passes in isolation):
+
+        1. `_yaml_file_cache` — memoized YAML parse keyed on
+           (str(config_path), st_mtime_ns, st_size). pytest reuses tmp_path base
+           dirs across the session, so a prior test's config.yaml can share both
+           the path string AND the (mtime_ns, size) of this test's tiny file
+           (same coarse mtime tick) → set_hermes_default_model() reads the STALE
+           cached dict (e.g. an lmstudio config) and writes THAT back, so the
+           on-disk assertion sees the wrong provider. This is the actual root
+           cause of the #4536 service_tier flake.
+        2. `cfg` / `_cfg_fingerprint` — if a prior test rebound `config.cfg`,
+           get_auxiliary_models() reads the stale dict after reload_config().
+
+        Clear both before AND after each test so neither an inherited leak nor
+        our own run can poison a neighbor.
         """
         from api import config
 
@@ -25,6 +32,8 @@ class TestIssue4536ServiceTier:
                 config.cfg = config._cfg_cache
                 config._cfg_fingerprint = None
                 config._cfg_mtime = 0.0
+            with config._yaml_file_cache_lock:
+                config._yaml_file_cache.clear()
 
         _reset()
         yield
