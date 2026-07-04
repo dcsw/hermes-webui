@@ -191,6 +191,21 @@ def test_stream_fade_uses_incremental_renderer_without_changing_default_path():
     assert "_wrapStreamingFadeWords" not in MESSAGES_JS
 
 
+def test_transparent_anchor_prose_uses_fade_renderer_when_enabled():
+    anchor_block = function_block(MESSAGES_JS, "_anchorProseIncrementalNode")
+    assert_contains_all(
+        anchor_block,
+        [
+            "const fade=typeof _shouldUseStreamFade==='function'&&_shouldUseStreamFade()",
+            "if(st && st.fade!==fade) st=null",
+            "if(body.classList) body.classList.toggle('stream-fade-active',fade)",
+            "const baseRenderer=fade?_streamFadeRenderer(body):_safeSmdRenderer(body)",
+            "st={node,parser:window.smd.parser(renderer),writtenText:'',fade}",
+            "const body=st.node&&st.node.querySelector&&st.node.querySelector('.msg-body')",
+        ],
+    )
+
+
 def test_stream_fade_done_drain_has_hard_cap_for_large_buffered_responses():
     drain_block = function_block(MESSAGES_JS, "_drainStreamFadeBeforeDone")
     assert "const _STREAM_FADE_DONE_DRAIN_MAX_MS=900" in MESSAGES_JS

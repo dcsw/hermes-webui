@@ -3637,21 +3637,24 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function _anchorProseIncrementalNode(key, text){
     if(!window.smd || !key || typeof _safeSmdRenderer!=='function') return null;
     const value=String(text||'');
+    const fade=typeof _shouldUseStreamFade==='function'&&_shouldUseStreamFade();
     try{
       let st=_anchorProseSmdCache.get(key);
       // Self-heal desyncs (edit/sanitize made the text no longer a pure append):
       // rebuild the parser+node from scratch, mirroring _smdWrite's guard.
       if(st && st.writtenText && !value.startsWith(st.writtenText)) st=null;
+      if(st && st.fade!==fade) st=null;
       if(!st){
         const node=document.createElement('div');
         node.className='assistant-segment';
         node.setAttribute('data-anchor-scene-prose','1');
         const body=document.createElement('div');
         body.className='msg-body';
+        if(body.classList) body.classList.toggle('stream-fade-active',fade);
         node.appendChild(body);
-        const baseRenderer=_safeSmdRenderer(body);
+        const baseRenderer=fade?_streamFadeRenderer(body):_safeSmdRenderer(body);
         const renderer=_smdRendererWithoutUnderscoreEmphasis(baseRenderer);
-        st={node,parser:window.smd.parser(renderer),writtenText:''};
+        st={node,parser:window.smd.parser(renderer),writtenText:'',fade};
         _anchorProseSmdCache.set(key,st);
         // Bound memory across turns: keys embed the stream id, so stale entries
         // from finished streams age out here.
@@ -3660,6 +3663,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           if(oldest!==key) _anchorProseSmdCache.delete(oldest);
         }
       }
+      const body=st.node&&st.node.querySelector&&st.node.querySelector('.msg-body');
+      if(body&&body.classList) body.classList.toggle('stream-fade-active',fade);
       const delta=value.slice(st.writtenText.length);
       if(delta){
         window.smd.parser_write(st.parser,delta);
