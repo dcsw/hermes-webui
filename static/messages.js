@@ -3636,7 +3636,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function _anchorProseIncrementalNode(key, text){
     if(!window.smd || !key || typeof _safeSmdRenderer!=='function') return null;
     const value=String(text||'');
-    const fade=typeof _shouldUseStreamFade==='function'&&_shouldUseStreamFade();
+    const fade=typeof _shouldUseLiveProseFade==='function'&&_shouldUseLiveProseFade();
     try{
       let st=_anchorProseSmdCache.get(key);
       // Self-heal desyncs (edit/sanitize made the text no longer a pure append):
@@ -4100,6 +4100,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
   function _shouldUseStreamFade(){
     return window._fadeTextEffect===true;
+  }
+  function _shouldUseLiveProseFade(){
+    return _shouldUseStreamFade() || (typeof isTransparentStream==='function'&&isTransparentStream());
   }
   function _streamFadeSkipNode(node){
     if(!node||node.nodeType!==1) return false;
@@ -4773,7 +4776,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           ? parsed.displayText                          // first segment: uses think-tag stripping
           : _stripXmlToolCalls(assistantText.slice(segmentStart));
         let anchorProcessText=displayText;
-        if(_shouldUseStreamFade()){
+        if(_shouldUseLiveProseFade()){
           const caughtUp=_renderStreamingFadeMarkdown(displayText);
           anchorProcessText=_streamFadeDomText||'';
           if(!caughtUp&&!_streamFinalized){
@@ -4806,7 +4809,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       scrollIfPinned();
       _throttledSnapshotLiveTurn();
     };
-    const frameIntervalMs=_shouldUseStreamFade()?33:66;
+    const frameIntervalMs=_shouldUseLiveProseFade()?33:66;
     if(sinceLastMs>=frameIntervalMs){
       _pendingRafHandle=requestAnimationFrame(_doRender);
     } else {
@@ -5499,7 +5502,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         });
         sendBrowserNotification('Response complete',_completionPreview||'Task finished',{forceHidden:_wasEverBackgrounded,sid:activeSid});
       };
-      if(_shouldUseStreamFade()&&assistantBody){
+      if(_shouldUseLiveProseFade()&&assistantBody){
         _cancelAnimationFramePendingStreamRender();
         _drainStreamFadeBeforeDone(_finishDone);
         return;

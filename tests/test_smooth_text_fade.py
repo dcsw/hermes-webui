@@ -256,15 +256,23 @@ if(spans.map(node=>node.textContent).join('|')!=='alpha|beta|gamma'){
 
 def test_transparent_anchor_prose_uses_fade_renderer_when_enabled():
     anchor_block = function_block(MESSAGES_JS, "_anchorProseIncrementalNode")
+    predicate_block = function_block(MESSAGES_JS, "_shouldUseLiveProseFade")
     assert_contains_all(
         anchor_block,
         [
-            "const fade=typeof _shouldUseStreamFade==='function'&&_shouldUseStreamFade()",
+            "const fade=typeof _shouldUseLiveProseFade==='function'&&_shouldUseLiveProseFade()",
             "if(st && st.fade!==fade) st=null",
             "if(body.classList) body.classList.toggle('stream-fade-active',fade)",
             "const baseRenderer=fade?_streamFadeRenderer(body):_safeSmdRenderer(body)",
             "st={node,parser:window.smd.parser(renderer),writtenText:'',fade}",
             "const body=st.node&&st.node.querySelector&&st.node.querySelector('.msg-body')",
+        ],
+    )
+    assert_contains_all(
+        predicate_block,
+        [
+            "_shouldUseStreamFade()",
+            "typeof isTransparentStream==='function'&&isTransparentStream()",
         ],
     )
 
@@ -280,6 +288,7 @@ def test_transparent_anchor_prose_receives_revealed_fade_text():
         [
             "let anchorProcessText=displayText",
             "const caughtUp=_renderStreamingFadeMarkdown(displayText)",
+            "if(_shouldUseLiveProseFade())",
             "anchorProcessText=_streamFadeDomText||''",
             "if(anchorProcessText) _upsertAnchorProcessProse(anchorProcessText)",
         ],
