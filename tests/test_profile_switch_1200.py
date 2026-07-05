@@ -518,6 +518,79 @@ def test_get_config_reloads_when_request_profile_changes_even_with_in_memory_ove
             config._cfg_fingerprint = orig_fingerprint
 
 
+def test_get_config_reloads_when_request_profile_changes_even_with_rebound_cfg_override(
+    tmp_path, monkeypatch
+):
+    """A rebound cfg override must not survive a request-profile switch."""
+    monkeypatch.delenv("HERMES_CONFIG_PATH", raising=False)
+    import api.config as config
+    import api.profiles as profiles
+
+    default_home = tmp_path / ".hermes"
+    work_home = default_home / "profiles" / "work"
+    work_home.mkdir(parents=True)
+    default_home.mkdir(exist_ok=True)
+    (default_home / "config.yaml").write_text(
+        "model:\n  provider: openai-codex\n  default: gpt-5.5\n",
+        encoding="utf-8",
+    )
+    (work_home / "config.yaml").write_text(
+        "model:\n  provider: openrouter\n  default: google/gemini-3-flash-preview\n"
+        "custom_providers:\n  llamacpp:\n    api_key: work-key\n",
+        encoding="utf-8",
+    )
+    same_mtime = 1_700_000_000
+    os.utime(default_home / "config.yaml", (same_mtime, same_mtime))
+    os.utime(work_home / "config.yaml", (same_mtime, same_mtime))
+
+    monkeypatch.setattr(
+        config,
+        "_get_config_path",
+        lambda: profiles.get_active_hermes_home() / "config.yaml",
+    )
+
+    orig_default_home = profiles._DEFAULT_HERMES_HOME
+    orig_active = profiles._active_profile
+    orig_cache = dict(config._cfg_cache)
+    orig_mtime = config._cfg_mtime
+    orig_path = getattr(config, "_cfg_path", None)
+    orig_fingerprint = getattr(config, "_cfg_fingerprint", None)
+    orig_cfg = config.cfg
+    profiles._tls.profile = None
+    try:
+        profiles._DEFAULT_HERMES_HOME = default_home
+        profiles._active_profile = "default"
+        config.reload_config()
+        monkeypatch.setattr(
+            config,
+            "cfg",
+            {"model": {"provider": "stale-override", "default": "old-model"}},
+            raising=False,
+        )
+        assert config._cfg_has_in_memory_overrides() is True
+        assert config.get_config()["model"]["provider"] == "stale-override"
+
+        profiles.set_request_profile("work")
+        assert config._get_config_path() == work_home / "config.yaml"
+        result = config.get_config()
+        assert result["model"]["provider"] == "openrouter"
+        assert result["model"]["default"] == "google/gemini-3-flash-preview"
+        assert result["custom_providers"]["llamacpp"]["api_key"] == "work-key"
+        assert config.cfg is config._cfg_cache
+    finally:
+        profiles.clear_request_profile()
+        profiles._DEFAULT_HERMES_HOME = orig_default_home
+        profiles._active_profile = orig_active
+        config._cfg_cache.clear()
+        config._cfg_cache.update(orig_cache)
+        config._cfg_mtime = orig_mtime
+        if hasattr(config, "_cfg_path"):
+            config._cfg_path = orig_path
+        if hasattr(config, "_cfg_fingerprint"):
+            config._cfg_fingerprint = orig_fingerprint
+        config.cfg = orig_cfg
+
+
 def test_chat_start_retags_empty_session_to_request_profile(monkeypatch, tmp_path):
     """An empty session created under profile A can be sent under profile B after a switch."""
     import api.routes as routes

@@ -521,7 +521,7 @@ def _refresh_config_cache(config_path: Path | None = None) -> None:
     Callers must hold _cfg_lock when invoking this helper because it mutates
     shared state.
     """
-    global _cfg_mtime, _cfg_path, _cfg_fingerprint
+    global _cfg_mtime, _cfg_path, _cfg_fingerprint, cfg
     if config_path is None:
         config_path = _get_config_path()
     _cfg_cache.clear()
@@ -582,6 +582,8 @@ def _refresh_config_cache(config_path: Path | None = None) -> None:
         logger.debug("Failed to load yaml config from %s", config_path)
     _apply_config_defaults(_cfg_cache)
     _cfg_fingerprint = _fingerprint_config(_cfg_cache)
+    # A real reload retargets the legacy cfg alias to the cache for this path.
+    cfg = _cfg_cache
     # Bust the models cache so the next request sees fresh config values.
     # Only delete the disk cache when config has actually changed -- not on
     # first-ever load (when _old_cfg_mtime == 0.0, i.e. server start or
