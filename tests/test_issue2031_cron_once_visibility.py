@@ -139,10 +139,10 @@ function makeElement(initialValue = '') {
 }
 function t(key) {
   const dict = {
-    cron_schedule_preset_label: 'Preset',
+    cron_schedule_preset_label: 'Schedule',
     cron_schedule_preset_hourly: 'Hourly',
     cron_schedule_preset_daily: 'Daily',
-    cron_schedule_preset_weekdays: 'Weekdays',
+    cron_schedule_preset_weekdays: 'Weekdays (Mon-Fri)',
     cron_schedule_preset_weekly: 'Weekly',
     cron_schedule_preset_monthly: 'Monthly',
     cron_schedule_preset_custom: 'Custom',
@@ -155,14 +155,16 @@ function esc(value) { return value == null ? '' : String(value); }
   'cronFormSchedule',
   'cronFormSchedulePreset',
   'cronFormSchedulePresetParams',
-  'cronFormScheduleHourField',
+  'cronFormScheduleCustomRow',
+  'cronFormScheduleTimeField',
   'cronFormScheduleMinuteField',
   'cronFormScheduleWeekdayField',
   'cronFormScheduleMonthDayField',
-  'cronFormScheduleHour',
+  'cronFormScheduleTime',
   'cronFormScheduleMinute',
   'cronFormScheduleWeekday',
   'cronFormScheduleMonthDay',
+  'cronFormSchedulePreview',
 ].forEach((id) => {
   elements[id] = makeElement();
 });
@@ -171,17 +173,24 @@ elements.cronFormSchedulePresetParams.style.display = 'none';
 
 _initCronSchedulePresetControls();
 
+// Split "HH:MM" from the time picker so assertions can read hour/minute separately.
+function timeHour() { const v = String(elements.cronFormScheduleTime.value || ''); return v.includes(':') ? v.split(':')[0].replace(/^0/, '') || '0' : ''; }
+function timeMin() { const v = String(elements.cronFormScheduleTime.value || ''); return v.includes(':') ? String(parseInt(v.split(':')[1], 10)) : ''; }
+
 function snapshot() {
   return {
     preset: elements.cronFormSchedulePreset.value,
     schedule: elements.cronFormSchedule.value,
     paramsDisplay: elements.cronFormSchedulePresetParams.style.display,
-    hourFieldDisplay: elements.cronFormScheduleHourField.style.display,
+    customRowDisplay: elements.cronFormScheduleCustomRow.style.display,
+    timeFieldDisplay: elements.cronFormScheduleTimeField.style.display,
     minuteFieldDisplay: elements.cronFormScheduleMinuteField.style.display,
     weekdayFieldDisplay: elements.cronFormScheduleWeekdayField.style.display,
     monthDayFieldDisplay: elements.cronFormScheduleMonthDayField.style.display,
-    hour: elements.cronFormScheduleHour.value,
-    minute: elements.cronFormScheduleMinute.value,
+    time: elements.cronFormScheduleTime.value,
+    hour: timeHour(),
+    minute: timeMin(),
+    minuteBox: elements.cronFormScheduleMinute.value,
     weekday: elements.cronFormScheduleWeekday.value,
     monthDay: elements.cronFormScheduleMonthDay.value,
     warning: elements.cronFormScheduleOnceWarning.style.display,
@@ -189,72 +198,67 @@ function snapshot() {
   };
 }
 
+// Hourly: raw sync + editing the standalone minute box.
 elements.cronFormSchedule.value = '15 * * * *';
-elements.cronFormSchedule.dispatchEvent('input');
+elements.cronFormSchedule.dispatchEvent('change');
 const hourlySync = snapshot();
-
 elements.cronFormSchedulePreset.value = 'hourly';
 elements.cronFormSchedulePreset.dispatchEvent('change');
 elements.cronFormScheduleMinute.value = '15';
 elements.cronFormScheduleMinute.dispatchEvent('change');
 const hourlyWrite = snapshot();
 
+// Daily: raw sync populates the time picker; editing the time regenerates.
 elements.cronFormSchedule.value = '30 7 * * *';
-elements.cronFormSchedule.dispatchEvent('input');
+elements.cronFormSchedule.dispatchEvent('change');
 const dailySync = snapshot();
-elements.cronFormScheduleHour.value = '7';
-elements.cronFormScheduleHour.dispatchEvent('change');
-elements.cronFormScheduleMinute.value = '30';
-elements.cronFormScheduleMinute.dispatchEvent('change');
+elements.cronFormScheduleTime.value = '07:30';
+elements.cronFormScheduleTime.dispatchEvent('change');
 const dailyWrite = snapshot();
 
 elements.cronFormSchedule.value = '5 22 * * 1-5';
-elements.cronFormSchedule.dispatchEvent('input');
+elements.cronFormSchedule.dispatchEvent('change');
 const weekdaysSync = snapshot();
 
 elements.cronFormSchedule.value = '45 8 * * 3';
-elements.cronFormSchedule.dispatchEvent('input');
+elements.cronFormSchedule.dispatchEvent('change');
 const weeklySync = snapshot();
 elements.cronFormSchedule.value = '0 9 * * 7';
-elements.cronFormSchedule.dispatchEvent('input');
+elements.cronFormSchedule.dispatchEvent('change');
 const weeklyRawSundaySync = snapshot();
 elements.cronFormScheduleWeekday.value = '3';
 elements.cronFormScheduleWeekday.dispatchEvent('change');
-elements.cronFormScheduleHour.value = '8';
-elements.cronFormScheduleHour.dispatchEvent('change');
-elements.cronFormScheduleMinute.value = '45';
-elements.cronFormScheduleMinute.dispatchEvent('change');
+elements.cronFormScheduleTime.value = '08:45';
+elements.cronFormScheduleTime.dispatchEvent('change');
 const weeklyWrite = snapshot();
 
 elements.cronFormSchedule.value = '10 6 15 * *';
-elements.cronFormSchedule.dispatchEvent('input');
+elements.cronFormSchedule.dispatchEvent('change');
 const monthlySync = snapshot();
 elements.cronFormScheduleMonthDay.value = '15';
 elements.cronFormScheduleMonthDay.dispatchEvent('change');
-elements.cronFormScheduleHour.value = '6';
-elements.cronFormScheduleHour.dispatchEvent('change');
-elements.cronFormScheduleMinute.value = '10';
-elements.cronFormScheduleMinute.dispatchEvent('change');
+elements.cronFormScheduleTime.value = '06:10';
+elements.cronFormScheduleTime.dispatchEvent('change');
 const monthlyWrite = snapshot();
 
 elements.cronFormSchedule.value = '30 7 * * *';
-elements.cronFormSchedule.dispatchEvent('input');
+elements.cronFormSchedule.dispatchEvent('change');
 const dailyAfterMonthlySync = snapshot();
 
+// Monthly clamp: out-of-range monthDay clamps to 31 on change.
 elements.cronFormSchedulePreset.value = 'monthly';
 elements.cronFormSchedulePreset.dispatchEvent('change');
-elements.cronFormScheduleHour.value = '99';
-elements.cronFormScheduleMinute.value = '-8';
+elements.cronFormScheduleTime.value = '23:00';
 elements.cronFormScheduleMonthDay.value = '99';
 elements.cronFormScheduleMonthDay.dispatchEvent('change');
 const normalizedMonthlyWrite = snapshot();
 
 elements.cronFormSchedule.value = '@daily';
-elements.cronFormSchedule.dispatchEvent('input');
+elements.cronFormSchedule.dispatchEvent('change');
 const shorthandCustom = snapshot();
 
 elements.cronFormSchedule.value = 'advanced: cron expression';
-elements.cronFormSchedule.dispatchEvent('input');
+elements.cronFormSchedule.dispatchEvent('change');
 const unsupportedCustom = snapshot();
 
 elements.cronFormSchedulePreset.value = 'custom';
@@ -284,7 +288,8 @@ console.log(JSON.stringify({
     assert result["hourlySync"]["preset"] == "hourly"
     assert result["hourlySync"]["schedule"] == "15 * * * *"
     assert result["hourlySync"]["paramsDisplay"] == ""
-    assert result["hourlySync"]["hourFieldDisplay"] == "none"
+    assert result["hourlySync"]["customRowDisplay"] == "none"
+    assert result["hourlySync"]["timeFieldDisplay"] == "none"
     assert result["hourlySync"]["minuteFieldDisplay"] == ""
     assert result["hourlySync"]["kind"] == "cron"
     assert result["hourlyWrite"]["schedule"] == "15 * * * *"
@@ -292,24 +297,30 @@ console.log(JSON.stringify({
 
     assert result["dailySync"]["preset"] == "daily"
     assert result["dailySync"]["schedule"] == "30 7 * * *"
-    assert result["dailySync"]["hourFieldDisplay"] == ""
-    assert result["dailySync"]["minuteFieldDisplay"] == ""
+    assert result["dailySync"]["timeFieldDisplay"] == ""
+    assert result["dailySync"]["minuteFieldDisplay"] == "none"
     assert result["dailySync"]["weekdayFieldDisplay"] == "none"
     assert result["dailySync"]["monthDayFieldDisplay"] == "none"
+    assert result["dailySync"]["customRowDisplay"] == "none"
+    assert result["dailySync"]["time"] == "07:30"
     assert result["dailyWrite"]["schedule"] == "30 7 * * *"
     assert result["dailyWrite"]["kind"] == "cron"
 
     assert result["weekdaysSync"]["preset"] == "weekdays"
     assert result["weekdaysSync"]["schedule"] == "5 22 * * 1-5"
-    assert result["weekdaysSync"]["hourFieldDisplay"] == ""
-    assert result["weekdaysSync"]["minuteFieldDisplay"] == ""
+    assert result["weekdaysSync"]["timeFieldDisplay"] == ""
+    assert result["weekdaysSync"]["minuteFieldDisplay"] == "none"
     assert result["weekdaysSync"]["weekdayFieldDisplay"] == "none"
     assert result["weekdaysSync"]["monthDayFieldDisplay"] == "none"
+    assert result["weekdaysSync"]["time"] == "22:05"
 
     assert result["weeklySync"]["preset"] == "weekly"
     assert result["weeklySync"]["schedule"] == "45 8 * * 3"
     assert result["weeklySync"]["weekdayFieldDisplay"] == ""
+    assert result["weeklySync"]["timeFieldDisplay"] == ""
     assert result["weeklySync"]["monthDayFieldDisplay"] == "none"
+    assert result["weeklySync"]["weekday"] == "3"
+    assert result["weeklySync"]["time"] == "08:45"
     assert result["weeklyRawSundaySync"]["preset"] == "weekly"
     assert result["weeklyRawSundaySync"]["schedule"] == "0 9 * * 7"
     assert result["weeklyRawSundaySync"]["weekday"] == "0"
@@ -319,33 +330,37 @@ console.log(JSON.stringify({
     assert result["monthlySync"]["preset"] == "monthly"
     assert result["monthlySync"]["schedule"] == "10 6 15 * *"
     assert result["monthlySync"]["monthDayFieldDisplay"] == ""
+    assert result["monthlySync"]["timeFieldDisplay"] == ""
     assert result["monthlySync"]["weekdayFieldDisplay"] == "none"
+    assert result["monthlySync"]["monthDay"] == "15"
+    assert result["monthlySync"]["time"] == "06:10"
     assert result["monthlyWrite"]["schedule"] == "10 6 15 * *"
     assert result["monthlyWrite"]["kind"] == "cron"
 
     assert result["dailyAfterMonthlySync"]["preset"] == "daily"
     assert result["dailyAfterMonthlySync"]["schedule"] == "30 7 * * *"
-    assert result["dailyAfterMonthlySync"]["hour"] == "7"
-    assert result["dailyAfterMonthlySync"]["minute"] == "30"
+    assert result["dailyAfterMonthlySync"]["time"] == "07:30"
     assert result["dailyAfterMonthlySync"]["monthDayFieldDisplay"] == "none"
 
     assert result["normalizedMonthlyWrite"]["schedule"] == "0 23 31 * *"
-    assert result["normalizedMonthlyWrite"]["hour"] == "23"
-    assert result["normalizedMonthlyWrite"]["minute"] == "0"
+    assert result["normalizedMonthlyWrite"]["time"] == "23:00"
     assert result["normalizedMonthlyWrite"]["monthDay"] == "31"
     assert result["normalizedMonthlyWrite"]["kind"] == "cron"
 
     assert result["shorthandCustom"]["preset"] == "custom"
     assert result["shorthandCustom"]["schedule"] == "@daily"
     assert result["shorthandCustom"]["paramsDisplay"] == "none"
+    assert result["shorthandCustom"]["customRowDisplay"] == ""
 
     assert result["unsupportedCustom"]["preset"] == "custom"
     assert result["unsupportedCustom"]["schedule"] == "advanced: cron expression"
     assert result["unsupportedCustom"]["paramsDisplay"] == "none"
+    assert result["unsupportedCustom"]["customRowDisplay"] == ""
 
     assert result["customSelectionPreserved"]["preset"] == "custom"
     assert result["customSelectionPreserved"]["schedule"] == "advanced: cron expression"
     assert result["customSelectionPreserved"]["paramsDisplay"] == "none"
+    assert result["customSelectionPreserved"]["customRowDisplay"] == ""
 
 
 def test_cron_schedule_raw_warning_listener_survives_missing_preset_params():
@@ -465,27 +480,43 @@ def test_cron_form_surfaces_one_shot_warning_copy_markers_and_preset_markup():
     assert "id=\"cronFormScheduleOnceWarning\"" in panels
     assert "id=\"cronFormSchedulePreset\"" in panels
     assert "id=\"cronFormSchedulePresetParams\"" in panels
-    assert "id=\"cronFormScheduleHour\"" in panels
+    assert "id=\"cronFormScheduleCustomRow\"" in panels
+    assert "id=\"cronFormScheduleTime\"" in panels
+    assert "type=\"time\"" in panels
     assert "id=\"cronFormScheduleMinute\"" in panels
     assert "id=\"cronFormScheduleWeekday\"" in panels
     assert "id=\"cronFormScheduleMonthDay\"" in panels
+    assert "id=\"cronFormSchedulePreview\"" in panels
     assert "cron_schedule_once_warning" in panels
     assert "_cronSchedulePresetIdForValue" in panels
     assert "_cronSchedulePresetOptionHtml" in panels
     assert "_initCronSchedulePresetControls" in panels
-    assert "addEventListener('input', _syncCronSchedulePresetAndWarning" in panels
+    # Raw-cron `input` only updates the warning/preview (NOT preset re-detection),
+    # so a partial custom value that transiently matches a preset can't hide the
+    # focused raw field mid-typing (#5554). Preset re-sync runs on change/init.
+    assert "addEventListener('input', _syncCronScheduleWarning" in panels
     assert "addEventListener('change', _syncCronSchedulePresetAndWarning" in panels
     assert "addEventListener('change', _applyCronSchedulePresetSelection" in panels
+    # UX fix: field edits regenerate the expression on `input` WITHOUT writing the
+    # clamped value back into the field being typed (only clamp on `change`).
+    assert "addEventListener('input', _regenCronScheduleFromFields" in panels
     assert ".cron-once-warning" in style
     assert ".cron-schedule-preset-shell" in style
     assert ".cron-schedule-preset-params" in style
     assert ".cron-schedule-preset-field" in style
     assert ".cron-schedule-preset-time-hint" in style
+    assert ".cron-schedule-preview" in style
+    # Time input is themed to match the other form controls (not bare native chrome).
+    assert "input[type=\"time\"]" in style
     assert "cron_schedule_time_hint" in panels
     assert "fields: ['minute']" in panels
-    assert "fields: ['hour', 'minute']" in panels
-    assert "fields: ['hour', 'minute', 'weekday']" in panels
-    assert "fields: ['hour', 'minute', 'monthDay']" in panels
+    assert "fields: ['time']" in panels
+    assert "fields: ['weekday', 'time']" in panels
+    assert "fields: ['monthDay', 'time']" in panels
+    # Custom is last in the preset order (after the common frequencies).
+    custom_idx = panels.index("id: 'custom'")
+    monthly_idx = panels.index("id: 'monthly'")
+    assert monthly_idx < custom_idx
     assert "Duration forms like '30m' run once" in i18n
 
 

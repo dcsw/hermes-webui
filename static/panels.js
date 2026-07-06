@@ -464,15 +464,29 @@ function _syncCronScheduleWarning() {
   const warning = $('cronFormScheduleOnceWarning');
   if (!input || !warning) return;
   warning.style.display = _cronScheduleKindForInput(input.value) === 'once' ? '' : 'none';
+  _syncCronSchedulePreview();
+}
+
+// Live preview of the generated cron expression in the preset hint line (the
+// cron-job.org / GitHub-schedule-editor convention) so a cron-literate user sees
+// exactly what the friendly controls produce. Empty on Custom (the raw field is shown).
+function _syncCronSchedulePreview() {
+  const preview = $('cronFormSchedulePreview');
+  const presetEl = $('cronFormSchedulePreset');
+  const scheduleEl = $('cronFormSchedule');
+  if (!preview) return;
+  const presetId = presetEl ? presetEl.value : 'custom';
+  const expr = String((scheduleEl && scheduleEl.value) || '').trim();
+  preview.textContent = (presetId !== 'custom' && expr) ? `${expr} · ` : '';
 }
 
 const CRON_SCHEDULE_PRESETS = [
-  { id: 'custom', label: 'cron_schedule_preset_custom', fallback: 'Custom', fields: [] },
   { id: 'hourly', label: 'cron_schedule_preset_hourly', fallback: 'Hourly', fields: ['minute'], defaults: { minute: 0 } },
-  { id: 'daily', label: 'cron_schedule_preset_daily', fallback: 'Daily', fields: ['hour', 'minute'], defaults: { hour: 9, minute: 0 } },
-  { id: 'weekdays', label: 'cron_schedule_preset_weekdays', fallback: 'Weekdays', fields: ['hour', 'minute'], defaults: { hour: 9, minute: 0 } },
-  { id: 'weekly', label: 'cron_schedule_preset_weekly', fallback: 'Weekly', fields: ['hour', 'minute', 'weekday'], defaults: { hour: 9, minute: 0, weekday: 1 } },
-  { id: 'monthly', label: 'cron_schedule_preset_monthly', fallback: 'Monthly', fields: ['hour', 'minute', 'monthDay'], defaults: { hour: 9, minute: 0, monthDay: 1 } },
+  { id: 'daily', label: 'cron_schedule_preset_daily', fallback: 'Daily', fields: ['time'], defaults: { hour: 9, minute: 0 } },
+  { id: 'weekdays', label: 'cron_schedule_preset_weekdays', fallback: 'Weekdays (Mon–Fri)', fields: ['time'], defaults: { hour: 9, minute: 0 } },
+  { id: 'weekly', label: 'cron_schedule_preset_weekly', fallback: 'Weekly', fields: ['weekday', 'time'], defaults: { hour: 9, minute: 0, weekday: 1 } },
+  { id: 'monthly', label: 'cron_schedule_preset_monthly', fallback: 'Monthly', fields: ['monthDay', 'time'], defaults: { hour: 9, minute: 0, monthDay: 1 } },
+  { id: 'custom', label: 'cron_schedule_preset_custom', fallback: 'Custom', fields: [] },
 ];
 
 function _cronSchedulePresetOptionHtml() {
@@ -487,11 +501,22 @@ function _cronSchedulePresetForId(presetId) {
 
 function _cronSchedulePresetControlIds() {
   return {
-    hour: 'cronFormScheduleHour',
+    time: 'cronFormScheduleTime',
     minute: 'cronFormScheduleMinute',
     weekday: 'cronFormScheduleWeekday',
     monthDay: 'cronFormScheduleMonthDay',
   };
+}
+
+// Which visible control wrapper each logical field lives in. `hour`+`minute` for
+// time-based presets share the single #cronFormScheduleTime picker (in the Time
+// field); `minute` alone (Hourly) uses the standalone Minute field.
+function _cronSchedulePresetFieldWrapId(field) {
+  if (field === 'time' || field === 'hour') return 'cronFormScheduleTimeField';
+  if (field === 'minute') return 'cronFormScheduleMinuteField';
+  if (field === 'weekday') return 'cronFormScheduleWeekdayField';
+  if (field === 'monthDay') return 'cronFormScheduleMonthDayField';
+  return '';
 }
 
 function _cronSchedulePresetFieldId(field) {
@@ -522,9 +547,32 @@ function _cronSchedulePresetNormalizeValue(field, value, fallback) {
 }
 
 function _cronSchedulePresetValueForField(field, fallback) {
+  // hour/minute for time-based presets come from the single #cronFormScheduleTime
+  // picker ("HH:MM"); the standalone Minute box (Hourly) still reads directly.
+  if (field === 'hour' || field === 'minute') {
+    const timeEl = $('cronFormScheduleTime');
+    const minuteBox = $('cronFormScheduleMinute');
+    // Hourly uses the standalone minute box; if the Time picker isn't the visible
+    // source for minute, prefer the minute box when it's the shown control.
+    if (field === 'minute' && minuteBox && (!timeEl || _cronScheduleMinuteBoxIsActive())) {
+      return _cronSchedulePresetNormalizeValue('minute', minuteBox.value, fallback);
+    }
+    if (timeEl && /^\d{1,2}:\d{2}$/.test(String(timeEl.value || '').trim())) {
+      const [h, m] = String(timeEl.value).trim().split(':');
+      return _cronSchedulePresetNormalizeValue(field, field === 'hour' ? h : m, fallback);
+    }
+    return _cronSchedulePresetNormalizeValue(field, fallback, fallback);
+  }
   const el = _cronSchedulePresetFieldEl(field);
   const raw = el ? String(el.value || '').trim() : '';
   return _cronSchedulePresetNormalizeValue(field, raw, fallback);
+}
+
+// The standalone Minute box is the active minute source only for the Hourly preset
+// (the only preset whose visible fields include a bare 'minute').
+function _cronScheduleMinuteBoxIsActive() {
+  const presetEl = $('cronFormSchedulePreset');
+  return !!(presetEl && presetEl.value === 'hourly');
 }
 
 function _cronSchedulePresetRawFieldInBounds(field, value) {
@@ -536,7 +584,20 @@ function _cronSchedulePresetRawFieldInBounds(field, value) {
 }
 
 function _cronSchedulePresetApplyValues(values) {
-  ['hour', 'minute', 'weekday', 'monthDay'].forEach((field) => {
+  // Write hour/minute into the single time picker as zero-padded HH:MM.
+  if (values.hour != null || values.minute != null) {
+    const timeEl = $('cronFormScheduleTime');
+    if (timeEl) {
+      const h = _cronSchedulePresetNormalizeValue('hour', values.hour, values.hour ?? 9);
+      const m = _cronSchedulePresetNormalizeValue('minute', values.minute, values.minute ?? 0);
+      timeEl.value = `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+    }
+  }
+  if (values.minute != null) {
+    const minuteBox = $('cronFormScheduleMinute');
+    if (minuteBox) minuteBox.value = _cronSchedulePresetNormalizeValue('minute', values.minute, values.minute);
+  }
+  ['weekday', 'monthDay'].forEach((field) => {
     const el = _cronSchedulePresetFieldEl(field);
     if (!el || values[field] == null) return;
     el.value = _cronSchedulePresetNormalizeValue(field, values[field], values[field]);
@@ -545,11 +606,16 @@ function _cronSchedulePresetApplyValues(values) {
 
 function _cronSchedulePresetSyncVisibility(presetId) {
   const wrapper = $('cronFormSchedulePresetParams');
+  const customRow = $('cronFormScheduleCustomRow');
   const preset = _cronSchedulePresetForId(presetId);
   const showFields = preset && Array.isArray(preset.fields) ? preset.fields : [];
-  if (wrapper) wrapper.style.display = presetId === 'custom' ? 'none' : '';
-  ['hour', 'minute', 'weekday', 'monthDay'].forEach((field) => {
-    const fieldWrap = $(`cronFormSchedule${field === 'monthDay' ? 'MonthDay' : field.charAt(0).toUpperCase() + field.slice(1)}Field`);
+  const isCustom = presetId === 'custom';
+  // Preset param controls hide entirely on Custom; the raw cron expression row
+  // shows ONLY on Custom (kept in the DOM as a hidden field otherwise).
+  if (wrapper) wrapper.style.display = isCustom ? 'none' : '';
+  if (customRow) customRow.style.display = isCustom ? '' : 'none';
+  ['time', 'minute', 'weekday', 'monthDay'].forEach((field) => {
+    const fieldWrap = $(_cronSchedulePresetFieldWrapId(field));
     if (fieldWrap) fieldWrap.style.display = showFields.includes(field) ? '' : 'none';
   });
 }
@@ -658,20 +724,44 @@ function _applyCronSchedulePresetSelection() {
   _syncCronScheduleWarning();
 }
 
+// Regenerate the cron expression from the current field values WITHOUT writing the
+// clamped values back into the field the user is editing — so typing into the Minute
+// box (or the time picker) doesn't snap a half-entered value to the default/clamp
+// mid-keystroke. Value clamping still happens on `change`/blur via the full apply.
+function _regenCronScheduleFromFields() {
+  const presetEl = $('cronFormSchedulePreset');
+  const scheduleEl = $('cronFormSchedule');
+  if (!presetEl || !scheduleEl) return;
+  const presetId = presetEl.value;
+  if (presetId === 'custom') return;
+  scheduleEl.value = _cronSchedulePresetValueForSelection(presetId);
+  _syncCronScheduleWarning();
+}
+
 function _initCronSchedulePresetControls() {
   const presetEl = $('cronFormSchedulePreset');
   const scheduleEl = $('cronFormSchedule');
   if (!presetEl || !scheduleEl) return;
   presetEl.addEventListener('change', _applyCronSchedulePresetSelection);
   if ($('cronFormSchedulePresetParams')) {
-    ['cronFormScheduleHour', 'cronFormScheduleMinute', 'cronFormScheduleWeekday', 'cronFormScheduleMonthDay'].forEach((id) => {
+    ['cronFormScheduleTime', 'cronFormScheduleMinute', 'cronFormScheduleWeekday', 'cronFormScheduleMonthDay'].forEach((id) => {
       const el = $(id);
       if (!el) return;
+      // On `change`/blur, clamp + normalize (writes values back). On `input`
+      // (per-keystroke), only regenerate the expression — never rewrite the field
+      // being typed into, so partial input like clearing Hour to type "14" isn't
+      // snapped to the default (#5554 UX fix).
       el.addEventListener('change', _applyCronSchedulePresetSelection);
-      el.addEventListener('input', _applyCronSchedulePresetSelection);
+      el.addEventListener('input', _regenCronScheduleFromFields);
     });
   }
-  scheduleEl.addEventListener('input', _syncCronSchedulePresetAndWarning);
+  // On raw-cron `input` (only reachable on Custom, where the raw row is shown),
+  // update ONLY the warning + preview — do NOT re-detect the preset or sync
+  // visibility, or a partial value momentarily matching a preset (e.g. typing
+  // "0 9 * * 1,3" transiently equals Weekly's "0 9 * * 1") would switch the preset
+  // and hide the focused raw field mid-keystroke (#5554). Preset re-detection runs
+  // on initial render and on `change`/blur.
+  scheduleEl.addEventListener('input', _syncCronScheduleWarning);
   scheduleEl.addEventListener('change', _syncCronSchedulePresetAndWarning);
   _syncCronSchedulePresetAndWarning();
 }
@@ -1451,7 +1541,7 @@ function openCronCreate(){
   _cronMode = 'create';
   _cronIsDuplicate = false;
   _cronSelectedSkills = [];
-  _renderCronForm({ name:'', schedule:'', prompt:'', deliver:'local', profile:'', toast_notifications:true, model:'', provider:'', isEdit:false });
+  _renderCronForm({ name:'', schedule:'0 9 * * *', prompt:'', deliver:'local', profile:'', toast_notifications:true, model:'', provider:'', isEdit:false });
   _cronSkillsCache = null;
   api('/api/skills').then(d=>{_cronSkillsCache=d.skills||[]; _bindCronSkillPicker();}).catch(()=>{});
   loadCronProfiles().then(()=>_refreshCronProfileSelect('')).catch(()=>{});
@@ -1522,34 +1612,44 @@ function _renderCronForm({ name, schedule, prompt, deliver, profile, toast_notif
           <input type="text" id="cronFormName" value="${esc(name || '')}" placeholder="${esc(t('cron_name_placeholder') || 'Optional')}" autocomplete="off">
         </div>
         <div class="detail-form-row">
-          <label for="cronFormSchedulePreset">${esc(t('cron_schedule_preset_label') || 'Preset')}</label>
+          <label for="cronFormSchedulePreset">${esc(t('cron_schedule_preset_label') || 'Schedule')}</label>
           <div class="cron-schedule-preset-shell">
-            <select id="cronFormSchedulePreset">
+            <select id="cronFormSchedulePreset" class="cron-schedule-preset-select">
               ${_cronSchedulePresetOptionHtml()}
             </select>
             <div id="cronFormSchedulePresetParams" class="cron-schedule-preset-params" style="display:none">
-              <div class="cron-schedule-preset-field" id="cronFormScheduleHourField">
-                <label for="cronFormScheduleHour">${esc(t('cron_schedule_hour_label') || 'Hour')}</label>
-                <input type="number" id="cronFormScheduleHour" min="0" max="23" step="1" value="9" autocomplete="off">
-              </div>
-              <div class="cron-schedule-preset-field" id="cronFormScheduleMinuteField">
-                <label for="cronFormScheduleMinute">${esc(t('cron_schedule_minute_label') || 'Minute')}</label>
-                <input type="number" id="cronFormScheduleMinute" min="0" max="59" step="1" value="0" autocomplete="off">
-              </div>
               <div class="cron-schedule-preset-field" id="cronFormScheduleWeekdayField">
-                <label for="cronFormScheduleWeekday">${esc(t('cron_schedule_weekday_label') || 'Weekday')}</label>
-                <input type="number" id="cronFormScheduleWeekday" min="0" max="6" step="1" value="1" autocomplete="off">
+                <span class="cron-schedule-preset-conj" aria-hidden="true">${esc(t('cron_schedule_conj_on') || 'on')}</span>
+                <select id="cronFormScheduleWeekday" aria-label="${esc(t('cron_schedule_weekday_label') || 'Day of week')}">
+                  <option value="0">${esc(t('cron_weekday_sun') || 'Sunday')}</option>
+                  <option value="1" selected>${esc(t('cron_weekday_mon') || 'Monday')}</option>
+                  <option value="2">${esc(t('cron_weekday_tue') || 'Tuesday')}</option>
+                  <option value="3">${esc(t('cron_weekday_wed') || 'Wednesday')}</option>
+                  <option value="4">${esc(t('cron_weekday_thu') || 'Thursday')}</option>
+                  <option value="5">${esc(t('cron_weekday_fri') || 'Friday')}</option>
+                  <option value="6">${esc(t('cron_weekday_sat') || 'Saturday')}</option>
+                </select>
               </div>
               <div class="cron-schedule-preset-field" id="cronFormScheduleMonthDayField">
-                <label for="cronFormScheduleMonthDay">${esc(t('cron_schedule_month_day_label') || 'Day')}</label>
-                <input type="number" id="cronFormScheduleMonthDay" min="1" max="31" step="1" value="1" autocomplete="off">
+                <span class="cron-schedule-preset-conj" aria-hidden="true">${esc(t('cron_schedule_conj_on_day') || 'on day')}</span>
+                <select id="cronFormScheduleMonthDay" aria-label="${esc(t('cron_schedule_month_day_label') || 'Day of month')}">
+                  ${Array.from({length:31},(_,i)=>`<option value="${i+1}">${i+1}</option>`).join('')}
+                </select>
               </div>
-              <div class="detail-form-hint cron-schedule-preset-time-hint">${esc(t('cron_schedule_time_hint') || 'Time is server time; cron runs server-side.')}</div>
+              <div class="cron-schedule-preset-field" id="cronFormScheduleTimeField">
+                <span class="cron-schedule-preset-conj" aria-hidden="true">${esc(t('cron_schedule_conj_at') || 'at')}</span>
+                <input type="time" id="cronFormScheduleTime" value="09:00" step="60" autocomplete="off" aria-label="${esc(t('cron_schedule_time_label') || 'Time')}">
+              </div>
+              <div class="cron-schedule-preset-field" id="cronFormScheduleMinuteField">
+                <span class="cron-schedule-preset-conj" aria-hidden="true">${esc(t('cron_schedule_conj_at_minute') || 'at minute')}</span>
+                <input type="number" id="cronFormScheduleMinute" min="0" max="59" step="1" value="0" autocomplete="off" aria-label="${esc(t('cron_schedule_minute_label') || 'Minute')}">
+              </div>
+              <div class="detail-form-hint cron-schedule-preset-time-hint"><span id="cronFormSchedulePreview" class="cron-schedule-preview"></span>${esc(t('cron_schedule_time_hint') || 'Time is server time; cron runs server-side.')}</div>
             </div>
           </div>
         </div>
-        <div class="detail-form-row">
-          <label for="cronFormSchedule">${esc(t('cron_schedule_label') || 'Schedule')}</label>
+        <div class="detail-form-row" id="cronFormScheduleCustomRow" style="display:none">
+          <label for="cronFormSchedule">${esc(t('cron_schedule_label') || 'Cron expression')}</label>
           <input type="text" id="cronFormSchedule" value="${esc(schedule || '')}" placeholder="0 9 * * *  —  every 1h  —  @daily" autocomplete="off" required>
           <div class="detail-form-hint">${esc(t('cron_schedule_hint') || "Cron expression or shorthand like 'every 1h'.")}</div>
           <div id="cronFormScheduleOnceWarning" class="detail-form-warning cron-once-warning" style="display:none">${esc(t('cron_schedule_once_warning') || "Duration forms like '30m' run once and are removed after running. Use 'every 30m' to keep a recurring job.")}</div>
