@@ -415,6 +415,7 @@
         <button class="update-btn" onclick="dismissUpdate()">Later</button>
         <button class="update-btn update-primary" id="btnApplyUpdate" onclick="applyUpdates()">Update Now</button>
         <button class="update-btn" id="btnForceUpdate" style="display:none;background:var(--error,#e05);color:#fff;border-color:var(--error,#e05)" onclick="forceUpdate(this)">Force update</button>
+        <button class="update-btn" id="btnClearUpdateLock" style="display:none" onclick="applyClearUpdateLock(this)">Clear lock and retry update</button>
       </div>
     </div>
     <div class="update-banner" id="staleClientBanner">

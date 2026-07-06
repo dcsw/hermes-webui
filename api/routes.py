@@ -15074,6 +15074,21 @@ def handle_post(handler, parsed) -> bool:
 
         return j(handler, apply_force_update(target))
 
+    if parsed.path == "/api/updates/clear_lock":
+        # Manual-instruction recovery for the .git/index.lock case. The
+        # endpoint NEVER removes a lock file from the server -- it returns
+        # the diagnostic + the exact 'rm' command for the operator, and on
+        # a re-click with the lock already gone, it re-runs the normal
+        # non-destructive apply path. See apply_clear_lock for the v2.2
+        # design rationale (round-2 gate cert: fcntl-flock cannot detect
+        # git's O_CREAT|O_EXCL locks, so any auto-delete path races).
+        target = body.get("target", "")
+        if target not in ("webui", "agent"):
+            return bad(handler, 'target must be "webui" or "agent"')
+        from api.updates import apply_clear_lock
+
+        return j(handler, apply_clear_lock(target))
+
     if parsed.path == "/api/updates/summary":
         from api.updates import summarize_update_payload
 
