@@ -18,10 +18,23 @@ def fake_get_model_context_length(model, base_url="", **kwargs):
 # ModuleNotFoundError. Guarding on find_spec keeps the real package intact
 # locally while preserving the CI import path. Nothing in this module asserts
 # against the fake metadata, so the shim is purely an import guard.
-if (
-    importlib.util.find_spec("agent") is None
-    or importlib.util.find_spec("agent.model_metadata") is None
-):
+def _real_agent_metadata_importable() -> bool:
+    """True only if the genuine agent.model_metadata can actually be imported.
+
+    ``importlib.util.find_spec`` RAISES ``ValueError: agent.__spec__ is None``
+    when a spec-less partial ``agent`` module is already in ``sys.modules`` (which
+    happens during CI collection), so it can't be probed bare. Attempt the real
+    import defensively instead: ANY failure means the genuine package isn't
+    usable here, so the shim should be installed.
+    """
+    try:
+        import agent.model_metadata as _amm  # noqa: F401
+        return getattr(_amm, "get_model_context_length", None) is not None
+    except Exception:
+        return False
+
+
+if not _real_agent_metadata_importable():
     fake_agent = sys.modules.get("agent") or types.ModuleType("agent")
     if not hasattr(fake_agent, "__path__"):
         fake_agent.__path__ = []
