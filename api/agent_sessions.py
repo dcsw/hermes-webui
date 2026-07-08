@@ -32,6 +32,7 @@ SOURCE_LABELS = {
     'telegram': 'Telegram',
     'tool': 'Tool',
     'tui': 'TUI',
+    'webhook': 'Webhook',
     'webui': 'WebUI',
     'weixin': 'Weixin',
 }
@@ -54,6 +55,8 @@ def normalize_agent_session_source(raw_source: str | None) -> dict:
         session_source = 'messaging'
     elif raw == 'cron':
         session_source = 'cron'
+    elif raw == 'webhook':
+        session_source = 'webhook'
     elif raw == 'tool':
         session_source = 'tool'
     elif raw == 'api_server':
@@ -173,7 +176,11 @@ def is_cli_session_row(row: dict) -> bool:
     source_label = _safe_lower(row.get("source_label"))
     if "webui" in {source, source_tag, raw_source, source_name, source_label}:
         return False
-    non_cli_sources = MESSAGING_SOURCES | {"cron", "tool", "api", "api_server"}
+    # 'subagent' is a delegated delegate_task child: view-only, owned by the
+    # runner, never a writable WebUI/CLI session (#5307). Classify it non-CLI so
+    # sidebar rows and every is_cli_session_row() consumer keep it out of the
+    # CLI/writable treatment.
+    non_cli_sources = MESSAGING_SOURCES | {"cron", "webhook", "tool", "api", "api_server", "subagent"}
     if {source, source_tag, raw_source, source_name, source_label} & non_cli_sources:
         return False
     if source == "messaging":
@@ -207,9 +214,18 @@ def is_cli_session_row_visible(row: dict) -> bool:
     if not is_cli_session_row(row):
         return True
 
-    message_count = _as_positive_int(row.get("actual_message_count") or row.get("message_count"))
+    actual_message_count = _as_positive_int(row.get("actual_message_count"))
+    message_count = actual_message_count or _as_positive_int(row.get("message_count"))
     if message_count <= 0:
         return False
+
+    if (
+        actual_message_count > 0
+        and _count_user_turns(row) > 0
+        and row.get("ended_at") is None
+        and not row.get("end_reason")
+    ):
+        return True
 
     if "tui" in {
         _normalize_source_name(row.get("source")),
@@ -446,7 +462,22 @@ def read_importable_agent_session_rows(
         return []
 
     log = log or logger
-    with closing(sqlite3.connect(str(db_path))) as conn:
+    # Open read-only for this projection/listing path: it is a pure read, and
+    # holding a write-capable handle on the live (multi-GB, WAL) state.db while
+    # the agent streams into it adds needless checkpoint/lock surface (#5455).
+    # The defensive index self-heal below still runs, but through a separate
+    # short-lived writable connection on the rare missing-index path only.
+    read_only_uri = f"{db_path.resolve().as_uri()}?mode=ro"
+    try:
+        conn = sqlite3.connect(read_only_uri, uri=True)
+    except sqlite3.Error as exc:
+        log.warning(
+            "agent session listing read-only open failed for %s; falling back to writable connection: %s",
+            db_path,
+            exc,
+        )
+        conn = sqlite3.connect(str(db_path))
+    with closing(conn):
         conn.row_factory = sqlite3.Row
         cur = conn.cursor()
 
@@ -504,16 +535,21 @@ def read_importable_agent_session_rows(
                 messages_index_present = any(str(row[1]) == "idx_messages_session" for row in cur.fetchall())
             except sqlite3.Error:
                 messages_index_present = False
-            try:
-                if not messages_index_present:
-                    cur.execute(
-                        "CREATE INDEX IF NOT EXISTS idx_messages_session "
-                        "ON messages(session_id, timestamp)"
-                    )
-                    conn.commit()
+            if not messages_index_present:
+                # Self-heal via a separate writable connection so the common
+                # (index-present) path keeps its read-only handle. On a truly
+                # read-only/locked db this fails and we degrade to the
+                # pre-aggregated cron-only path below, exactly as before.
+                try:
+                    with closing(sqlite3.connect(str(db_path))) as _heal:
+                        _heal.execute(
+                            "CREATE INDEX IF NOT EXISTS idx_messages_session "
+                            "ON messages(session_id, timestamp)"
+                        )
+                        _heal.commit()
                     messages_index_present = True
-            except sqlite3.Error:
-                pass  # read-only db / locked / older schema — degrade gracefully
+                except sqlite3.Error:
+                    pass  # read-only db / locked / older schema — degrade gracefully
 
         if use_messages_join:
             actual_count_expr = f"COUNT(m.{count_col})"
@@ -1083,6 +1119,9 @@ def read_session_lineage_metadata(db_path: Path, session_ids: list[str] | set[st
                 parent_root = _continuation_root_id(rows, parent_id)
                 if parent_root:
                     entry['_parent_lineage_root_id'] = parent_root
+                    if parent_root not in lineage_tip_cache:
+                        lineage_tip_cache[parent_root] = freshest_continuation_tip(parent_root)
+                    entry['_parent_lineage_tip_id'] = lineage_tip_cache[parent_root][0]
                 continue
 
         root_id, segment_count = continuation_root_and_depth(sid)

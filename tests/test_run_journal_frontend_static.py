@@ -4,9 +4,9 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-MESSAGES_SRC = (ROOT / "static" / "messages.js").read_text()
-SESSIONS_SRC = (ROOT / "static" / "sessions.js").read_text()
-UI_SRC = (ROOT / "static" / "ui.js").read_text()
+MESSAGES_SRC = (ROOT / "static" / "messages.js").read_text(encoding="utf-8")
+SESSIONS_SRC = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+UI_SRC = (ROOT / "static" / "ui.js").read_text(encoding="utf-8")
 
 
 def _function_body(src: str, signature: str) -> str:
@@ -213,7 +213,11 @@ process.stdout.write(JSON.stringify({{
 
 def test_reattach_path_uses_replay_when_status_reports_journal():
     reattach_pos = MESSAGES_SRC.index("let replayOnly=false;")
-    block = MESSAGES_SRC[reattach_pos : reattach_pos + 1200]
+    # Window widened to 2200: the SSE-recovery follow-restore fix (the
+    # _wasFollowingAtReconnectDead guard + its sticky-unpin check) inserted lines
+    # into the reconnect-dead cleanup block between this anchor and the
+    # replay-params assertion below, pushing the target string past the old slice.
+    block = MESSAGES_SRC[reattach_pos : reattach_pos + 2200]
 
     assert "st.replay_available" in block
     assert "replayOnly=true" in block
@@ -222,8 +226,12 @@ def test_reattach_path_uses_replay_when_status_reports_journal():
 
 
 def test_error_reconnect_path_can_restore_from_journal():
-    reconnect_pos = MESSAGES_SRC.index("setComposerStatus('Reconnecting")
-    block = MESSAGES_SRC[reconnect_pos : reconnect_pos + 900]
+    # Anchor on the reconnect block's stable entry point rather than the exact
+    # composer-status string: the first status was changed to a template literal
+    # `Reconnecting… (1/${_retryDelays.length})` (staged-probe counter), so the
+    # old single-quoted "setComposerStatus('Reconnecting" anchor no longer exists.
+    reconnect_pos = MESSAGES_SRC.index("_reconnectAttempted=true;")
+    block = MESSAGES_SRC[reconnect_pos : reconnect_pos + 1100]
 
     assert "st.active" in block
     assert "st.replay_available" in block
@@ -319,7 +327,8 @@ def test_server_runtime_journal_snapshot_restores_structured_inflight_state():
     helper_pos = SESSIONS_SRC.index("function _serverLiveSnapshotToolId")
     helper_block = SESSIONS_SRC[helper_pos : helper_pos + 3600]
     load_pos = SESSIONS_SRC.index("async function loadSession")
-    load_block = SESSIONS_SRC[load_pos : load_pos + 20000]
+    load_end = SESSIONS_SRC.index("// ── Handoff hint logic", load_pos)
+    load_block = SESSIONS_SRC[load_pos:load_end]
 
     assert "runtime_journal_snapshot" in load_block
     assert "_serverLiveSnapshotInflight(S.session.runtime_journal_snapshot" in load_block

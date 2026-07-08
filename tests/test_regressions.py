@@ -344,7 +344,7 @@ def test_server_delete_prunes_session_index(cleanup_test_sessions):
             text.find('if parsed.path == "/api/session/delete":'),
         )
         if delete_idx >= 0:
-            delete_block = text[delete_idx:delete_idx+1800]
+            delete_block = text[delete_idx:delete_idx+2400]
             assert "prune_session_from_index(sid)" in delete_block, \
                 f"{label} session/delete must prune SESSION_INDEX_FILE"
             return
@@ -359,7 +359,7 @@ def test_server_delete_removes_session_bak_snapshot(cleanup_test_sessions):
         routes_src.find('if parsed.path == "/api/session/delete":'),
     )
     assert delete_idx >= 0, "session/delete handler not found in api/routes.py"
-    delete_block = routes_src[delete_idx:delete_idx+1800]
+    delete_block = routes_src[delete_idx:delete_idx+2400]
     assert "with_suffix('.json.bak').unlink" in delete_block or 'with_suffix(".json.bak").unlink' in delete_block, \
         "session/delete must unlink <sid>.json.bak to avoid later orphan-backup recovery"
 
@@ -642,8 +642,11 @@ def test_reload_path_restores_pending_message_and_reattaches_live_stream(cleanup
     assert 'pending_user_message' in ui_src
     assert 'function attachLiveStream' in messages_src
     assert 'const pendingMsg=typeof getPendingSessionMessage' in sessions_src
-    assert ('const activeStreamId=data.session.active_stream_id||null;' in sessions_src or
-            'const activeStreamId=S.session.active_stream_id||null;' in sessions_src)
+    # `activeStreamId` declaration was widened const → let (#5248 race-guard
+    # re-reads it after the awaited message load). Accept either keyword via a
+    # prefix anchor that omits const/let.
+    assert ('activeStreamId=data.session.active_stream_id||null;' in sessions_src or
+            'activeStreamId=S.session.active_stream_id||null;' in sessions_src)
     assert 'attachLiveStream(sid, activeStreamId' in sessions_src
     assert 'if (S.activeStreamId && S.activeStreamId === streamId) return;' in ui_src
     active_branch_start = sessions_src.index("if(activeStreamId){\n      S.busy=true;")
@@ -748,7 +751,7 @@ def test_loadSession_inflight_merges_tail_with_persisted_transcript(cleanup_test
     assert inflight_idx >= 0, "INFLIGHT branch not found in loadSession"
     inflight_block = src[inflight_idx:inflight_idx+1200]
 
-    assert "await _ensureMessagesLoaded(sid);" in inflight_block, (
+    assert "await _ensureMessagesLoaded(sid" in inflight_block, (
         "returning to an active stream should load the persisted transcript before adding the live tail"
     )
     assert "_mergeInflightTailMessages(S.messages,inflightMessages)" in inflight_block, (
@@ -1027,8 +1030,61 @@ def test_messages_js_live_assistant_segment_reuses_live_turn_wrapper(cleanup_tes
         "live answer content should be appended as a segment inside the live turn wrapper"
     assert "if(!force&&!assistantRow){" in src.replace(' ', ''), \
         "ensureAssistantRow must still avoid creating the live answer segment when no display text exists yet"
-    assert "if(String((parsed&&parsed.displayText)||'').trim()||assistantRow) ensureAssistantRow();" in src, \
+    token_start = src.find("source.addEventListener('token'")
+    interim_start = src.find("source.addEventListener('interim_assistant'", token_start)
+    assert token_start >= 0 and interim_start > token_start
+    token_body = src[token_start:interim_start]
+    compact_token_body = token_body.replace(" ", "").replace("\n", "")
+    assert "if(assistantRow){ensureAssistantRow();_scheduleRender();}" in compact_token_body, \
+        "token handler should skip the per-token full-text parse after the live answer segment exists"
+    assert "constparsed=_parseStreamState();if(String((parsed&&parsed.displayText)||'').trim())ensureAssistantRow();_scheduleRender(parsed);" in compact_token_body, \
         "token handler must only create the live answer segment once visible answer text starts"
+
+
+def test_messages_js_stream_perf_cleanup_lifecycle(cleanup_test_sessions):
+    """#5455 review: throttled snapshot timers and incremental anchor caches tear down at terminal events."""
+    src = (REPO_ROOT / "static/messages.js").read_text()
+    assert "function _cancelThrottledSnapshotTimer()" in src
+    assert "clearTimeout(_snapshotLiveTurnTimer)" in src
+    assert "function _clearAnchorProseIncrementalNode()" in src
+    assert "window.__anchorProseIncrementalNode===_anchorProseIncrementalNode" in src
+    assert "_anchorProseSmdCache.clear();" in src
+    fallback_start = src.find("function _finalizeStreamEndFallback")
+    recovery_start = src.find("async function _runStreamEndRecovery", fallback_start)
+    assert fallback_start >= 0 and recovery_start > fallback_start
+    fallback_body = src[fallback_start:recovery_start]
+    assert "_cancelThrottledSnapshotTimer();" in fallback_body
+    assert "_clearAnchorProseIncrementalNode();" in fallback_body
+    done_start = src.find("source.addEventListener('done'")
+    stream_end_start = src.find("source.addEventListener('stream_end'", done_start)
+    assert done_start >= 0 and stream_end_start > done_start
+    done_body = src[done_start:stream_end_start]
+    assert "_cancelThrottledSnapshotTimer();" in done_body
+    assert "_clearAnchorProseIncrementalNode();" in done_body
+
+    # #5466 Codex gate: the snapshot/anchor cleanup must run on EVERY terminal
+    # path, not just fallback/done/stream_end — otherwise a timer/cache/global
+    # survives the turn on apperror, cancel, stream-error, and the settled-session
+    # recovery path (the PR's own stated teardown invariant).
+    def _terminal_body(anchor, end_marker):
+        a = src.find(anchor)
+        assert a >= 0, f"missing terminal handler: {anchor}"
+        b = src.find(end_marker, a)
+        assert b > a, f"could not bound terminal handler: {anchor}"
+        return src[a:b]
+
+    apperror_body = _terminal_body("source.addEventListener('apperror'", "_streamFadeCleanupReduceMotionListener();")
+    assert "_cancelThrottledSnapshotTimer();" in apperror_body and "_clearAnchorProseIncrementalNode();" in apperror_body, \
+        "apperror terminal handler must tear down the snapshot timer + anchor prose cache"
+    cancel_body = _terminal_body("source.addEventListener('cancel'", "_streamFadeCleanupReduceMotionListener();")
+    assert "_cancelThrottledSnapshotTimer();" in cancel_body and "_clearAnchorProseIncrementalNode();" in cancel_body, \
+        "cancel terminal handler must tear down the snapshot timer + anchor prose cache"
+    stream_error_body = _terminal_body("function _handleStreamError(source)", "_streamFadeCleanupReduceMotionListener();")
+    assert "_cancelThrottledSnapshotTimer();" in stream_error_body and "_clearAnchorProseIncrementalNode();" in stream_error_body, \
+        "_handleStreamError must tear down the snapshot timer + anchor prose cache"
+    restore_body = _terminal_body("async function _restoreSettledSession(source", "_cancelAnimationFramePendingStreamRender();")
+    assert "_cancelThrottledSnapshotTimer();" in restore_body and "_clearAnchorProseIncrementalNode();" in restore_body, \
+        "_restoreSettledSession terminal recovery must tear down the snapshot timer + anchor prose cache"
 
 
 def test_messages_js_finalizes_thinking_card_before_tool_card(cleanup_test_sessions):
