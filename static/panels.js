@@ -5648,19 +5648,24 @@ function syncWorkspaceDisplays(){
   const mobileAction=$('composerMobileWorkspaceAction');
   const mobileLabel=$('composerMobileWorkspaceLabel');
   const composerDropdown=$('composerWsDropdown');
-  if(!hasWorkspace && composerDropdown) composerDropdown.classList.remove('open');
+  if(!hasWorkspace && composerDropdown) _setWorkspaceDropdownOpenState(composerDropdown,false);
   // Only show workspace label once boot has finished to prevent
   // flash of "No workspace" before the saved session finishes loading.
   if(composerLabel) composerLabel.textContent=S._bootReady?label:'';
   if(mobileLabel) mobileLabel.textContent=S._bootReady?label:'';
+  const composerExpanded=!!(composerDropdown&&composerDropdown.classList.contains('open'));
   if(composerChip){
     composerChip.disabled=!hasWorkspace;
     composerChip.title=hasWorkspace?ws:t('no_workspace');
-    composerChip.classList.toggle('active',!!(composerDropdown&&composerDropdown.classList.contains('open')));
+    composerChip.setAttribute('aria-label',hasWorkspace?t('workspace_switcher_aria',label):t('no_workspace'));
+    composerChip.setAttribute('aria-expanded',composerExpanded?'true':'false');
+    composerChip.classList.toggle('active',composerExpanded);
   }
   if(mobileAction){
     mobileAction.title=hasWorkspace?ws:t('no_workspace');
-    mobileAction.classList.toggle('active',!!(composerDropdown&&composerDropdown.classList.contains('open')));
+    mobileAction.setAttribute('aria-label',hasWorkspace?t('workspace_switcher_aria',label):t('no_workspace'));
+    mobileAction.setAttribute('aria-expanded',composerExpanded?'true':'false');
+    mobileAction.classList.toggle('active',composerExpanded);
   }
 }
 
@@ -5673,6 +5678,41 @@ async function loadWorkspaceList(){
     if(typeof syncTerminalButton==='function') syncTerminalButton();
     return data;
   }catch(e){ return {workspaces:[], last:''}; }
+}
+
+function _setWorkspaceDropdownOpenState(dd,open){
+  if(!dd)return;
+  dd.classList.toggle('open',!!open);
+  dd.hidden=!open;
+  dd.setAttribute('aria-hidden',open?'false':'true');
+  if(open){
+    try{dd.inert=false;}catch(_){}
+    dd.removeAttribute('inert');
+  }else{
+    try{dd.inert=true;}catch(_){}
+    dd.setAttribute('inert','');
+  }
+}
+
+function _getComposerWorkspaceFocusTarget(){
+  const panel=(typeof $==='function')?$('composerMobileConfigPanel'):null;
+  const mobileAction=(typeof $==='function')?$('composerMobileWorkspaceAction'):null;
+  if(panel&&panel.classList.contains('open')&&mobileAction&&!mobileAction.disabled) return mobileAction;
+  return (typeof $==='function')?$('composerWorkspaceChip'):null;
+}
+
+function _focusComposerWorkspaceTarget(target){
+  if(target&&!target.disabled&&typeof target.focus==='function'){
+    try{target.focus({preventScroll:true});}
+    catch(_){target.focus();}
+  }
+}
+
+function _shouldRestoreComposerWorkspaceFocus(dd){
+  if(typeof document==='undefined') return true;
+  const active=document.activeElement;
+  if(!active||active===document.body) return true;
+  return !!(dd&&dd.contains(active));
 }
 
 function _renderWorkspaceAction(label, meta, iconSvg, onClick){
@@ -5828,7 +5868,7 @@ function toggleWsDropdown(){
     closeProfileDropdown(); // close profile dropdown if open
     loadWorkspaceList().then(data=>{
       renderWorkspaceDropdownInto(dd, data.workspaces, S.session?.workspace||S._profileDefaultWorkspace||data.last||'');
-      dd.classList.add('open');
+      _setWorkspaceDropdownOpenState(dd,true);
     });
   }
 }
@@ -5848,10 +5888,16 @@ function toggleComposerWsDropdown(){
     if(typeof closeReasoningDropdown==='function') closeReasoningDropdown();
     loadWorkspaceList().then(data=>{
       renderWorkspaceDropdownInto(dd, data.workspaces, S.session?.workspace||S._profileDefaultWorkspace||data.last||'');
-      dd.classList.add('open');
+      _setWorkspaceDropdownOpenState(dd,true);
       _positionComposerWsDropdown();
-      if(chip) chip.classList.add('active');
-      if(mobileAction) mobileAction.classList.add('active');
+      if(chip){
+        chip.classList.add('active');
+        chip.setAttribute('aria-expanded','true');
+      }
+      if(mobileAction){
+        mobileAction.classList.add('active');
+        mobileAction.setAttribute('aria-expanded','true');
+      }
     });
   }
 }
@@ -5861,10 +5907,16 @@ function closeWsDropdown(){
   const composerDd=$('composerWsDropdown');
   const composerChip=$('composerWorkspaceChip');
   const mobileAction=$('composerMobileWorkspaceAction');
-  if(dd)dd.classList.remove('open');
-  if(composerDd)composerDd.classList.remove('open');
-  if(composerChip)composerChip.classList.remove('active');
-  if(mobileAction)mobileAction.classList.remove('active');
+  if(dd)_setWorkspaceDropdownOpenState(dd,false);
+  if(composerDd)_setWorkspaceDropdownOpenState(composerDd,false);
+  if(composerChip){
+    composerChip.classList.remove('active');
+    composerChip.setAttribute('aria-expanded','false');
+  }
+  if(mobileAction){
+    mobileAction.classList.remove('active');
+    mobileAction.setAttribute('aria-expanded','false');
+  }
 }
 document.addEventListener('click',e=>{
   if(
@@ -6308,6 +6360,10 @@ async function switchToWorkspace(path,name){
     if(typeof cancelEditMode==='function')cancelEditMode();
     if(typeof clearPreview==='function')clearPreview();
   }
+  const composerDd=(typeof $==='function')?$('composerWsDropdown'):null;
+  const restoreComposerFocusTarget=(composerDd&&composerDd.classList.contains('open')&&typeof _getComposerWorkspaceFocusTarget==='function')
+    ? _getComposerWorkspaceFocusTarget()
+    : null;
   try{
     closeWsDropdown();
     await api('/api/session/update',{method:'POST',body:JSON.stringify({
@@ -6319,6 +6375,12 @@ async function switchToWorkspace(path,name){
     S._profileSwitchWorkspace=null;
     S._pendingSessionToolsets=null;
     syncTopbar();
+    if(
+      restoreComposerFocusTarget&&
+      typeof _shouldRestoreComposerWorkspaceFocus==='function'&&
+      _shouldRestoreComposerWorkspaceFocus(composerDd)&&
+      typeof _focusComposerWorkspaceTarget==='function'
+    ) _focusComposerWorkspaceTarget(restoreComposerFocusTarget);
     await loadDir('.');
     if (_currentPanel === 'memory') await loadMemory(true);
     showToast(t('workspace_switched_to',name||getWorkspaceFriendlyName(path)));
@@ -8543,6 +8605,8 @@ function _preferencesPayloadFromUi(){
   if(syncCb) payload.sync_to_insights=syncCb.checked;
   const updateCb=$('settingsCheckUpdates');
   if(updateCb) payload.check_for_updates=updateCb.checked;
+  const updateChannelSel=$('settingsUpdateChannel');
+  if(updateChannelSel) payload.update_channel=updateChannelSel.value;
   const ignoreAgentUpdatesCb=$('settingsIgnoreAgentUpdates');
   if(ignoreAgentUpdatesCb) payload.ignore_agent_updates=ignoreAgentUpdatesCb.checked;
   const whatsNewSummaryCb=$('settingsWhatsNewSummary');
@@ -8735,9 +8799,21 @@ async function loadSettingsPanel(){
     checkWebUIVersionSkew(settings);
     // Populate the version badges from the server — keeps them in sync with git
     // tags automatically without any manual release step.
+    //
+    // The DISPLAY badge uses update_channel_version (a channel-scoped
+    // `git describe --match`), which is SEPARATE from settings.webui_version.
+    // webui_version is load-bearing for asset cache-busting / SW cache / stale-
+    // client skew detection and must stay channel-neutral — never render it as
+    // the channel badge. See api/updates.channel_version_badge().
     const webuiBadge = $('settings-webui-version-badge');
     if(webuiBadge){
-      webuiBadge.textContent = `WebUI: ${settings.webui_version || 'not detected'}`;
+      const chanVer = settings.update_channel_version || settings.webui_version || 'not detected';
+      const chan = settings.update_channel==='experimental' ? 'experimental' : 'stable';
+      // Only annotate the channel when on experimental — stable is the implicit
+      // default and needs no extra chrome.
+      webuiBadge.textContent = chan==='experimental'
+        ? `WebUI: ${chanVer} · Experimental`
+        : `WebUI: ${chanVer}`;
     }
     const agentBadge = $('settings-agent-version-badge');
     if(agentBadge){
@@ -8944,6 +9020,11 @@ async function loadSettingsPanel(){
           for(const m of [...(g.models||[]),...(g.extra_models||[])]){
             const opt=document.createElement('option');
             opt.value=m.id;opt.textContent=m.label;
+            if(m && (m.supports_fast_tier === true || String(m.supports_fast_tier).toLowerCase()==='true')){
+              opt.dataset.fast='1';
+            }else if(m && (m.supports_fast_tier === false || String(m.supports_fast_tier).toLowerCase()==='false')){
+              opt.dataset.fast='0';
+            }
             og.appendChild(opt);
           }
           modelSel.appendChild(og);
@@ -9128,6 +9209,24 @@ async function loadSettingsPanel(){
     if(syncCb){syncCb.checked=!!settings.sync_to_insights;syncCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
     const updateCb=$('settingsCheckUpdates');
     if(updateCb){updateCb.checked=settings.check_for_updates!==false;updateCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
+    const updateChannelSel=$('settingsUpdateChannel');
+    if(updateChannelSel){
+      updateChannelSel.value=settings.update_channel==='experimental'?'experimental':'stable';
+      updateChannelSel.addEventListener('change',function(){
+        // Persist the channel, then invalidate the cached update check and
+        // re-check so the banner reflects the newly-selected channel. Changing
+        // the channel changes WHAT is offered, never WHAT is installed — the
+        // update banner still gates the actual apply behind "Update Now".
+        _schedulePreferencesAutosave();
+        if(typeof checkUpdatesNow==='function'){
+          // Pass the just-selected channel EXPLICITLY so the re-check cannot race
+          // the debounced autosave PUT and answer for the previous channel.
+          const _picked=updateChannelSel.value;
+          setTimeout(function(){try{checkUpdatesNow(_picked);}catch(e){}},400);
+        }
+        if(typeof _syncUpdateChannelBadge==='function') _syncUpdateChannelBadge(updateChannelSel.value);
+      },{once:false});
+    }
     const ignoreAgentUpdatesCb=$('settingsIgnoreAgentUpdates');
     if(ignoreAgentUpdatesCb){ignoreAgentUpdatesCb.checked=!!settings.ignore_agent_updates;ignoreAgentUpdatesCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
     const whatsNewSummaryCb=$('settingsWhatsNewSummary');
@@ -11703,7 +11802,21 @@ function _applySavedSettingsUi(saved, body, opts){
   if(typeof renderSessionList==='function') renderSessionList();
 }
 
-async function checkUpdatesNow(){
+// Instant client-side badge feedback when the update channel is toggled, before
+// the server round-trip that authoritatively re-renders the badge from
+// update_channel_version. Keeps the "· Experimental" suffix in sync immediately.
+function _syncUpdateChannelBadge(channel){
+  try{
+    const badge=$('settings-webui-version-badge');
+    if(!badge) return;
+    let base=badge.textContent||'';
+    // Strip any existing " · Experimental" suffix, then re-append if needed.
+    base=base.replace(/\s·\sExperimental\s*$/,'');
+    badge.textContent = channel==='experimental' ? (base+' · Experimental') : base;
+  }catch(e){}
+}
+
+async function checkUpdatesNow(channelOverride){
   const btn=$('btnCheckUpdatesNow');
   const label=$('checkUpdatesLabel');
   const spinner=$('checkUpdatesSpinner');
@@ -11714,8 +11827,15 @@ async function checkUpdatesNow(){
   if(spinner) spinner.style.display='';
   if(label) label.textContent=t('settings_checking');
   if(status) status.textContent='';
+
   try {
-    const data=await api('/api/updates/check',{method:'POST',body:JSON.stringify({force:true}),timeoutMs:60000});
+    // Pass the channel explicitly when the caller has one (e.g. the dropdown
+    // just switched) so the check cannot race the debounced settings autosave
+    // and answer for the previous channel. Omit otherwise → server uses the
+    // saved setting. (Fable UX gate.)
+    const _checkBody={force:true};
+    if(channelOverride==='stable'||channelOverride==='experimental') _checkBody.channel=channelOverride;
+    const data=await api('/api/updates/check',{method:'POST',body:JSON.stringify(_checkBody),timeoutMs:60000});
     if(data.disabled){
       if(status){status.textContent=t('settings_updates_disabled');status.style.color='var(--muted)';}
     } else {
@@ -11777,29 +11897,57 @@ async function checkUpdatesNow(){
 
 // ── Auxiliary Models ──────────────────────────────────────────────────────────
 
-// Canonical auxiliary task slots with display names.
-// Keep in sync with hermes_cli/main.py _AUX_TASKS and hermes_cli/web_server.py _AUX_TASK_SLOTS.
-const _AUX_TASK_SLOTS=[
- {key:'vision',nameKey:'settings_aux_task_vision',descKey:'settings_aux_task_vision_desc'},
- {key:'compression',nameKey:'settings_aux_task_compression',descKey:'settings_aux_task_compression_desc'},
- {key:'web_extract',nameKey:'settings_aux_task_web_extract',descKey:'settings_aux_task_web_extract_desc'},
- {key:'session_search',nameKey:'settings_aux_task_session_search',descKey:'settings_aux_task_session_search_desc'},
- {key:'approval',nameKey:'settings_aux_task_approval',descKey:'settings_aux_task_approval_desc'},
- {key:'mcp',nameKey:'settings_aux_task_mcp',descKey:'settings_aux_task_mcp_desc'},
- {key:'title_generation',nameKey:'settings_aux_task_title_generation',descKey:'settings_aux_task_title_generation_desc'},
- {key:'skills_hub',nameKey:'settings_aux_task_skills_hub',descKey:'settings_aux_task_skills_hub_desc'},
- {key:'curator',nameKey:'settings_aux_task_curator',descKey:'settings_aux_task_curator_desc'},
- {key:'kanban_decomposer',nameKey:'settings_aux_task_kanban_decomposer',descKey:'settings_aux_task_kanban_decomposer_desc'},
- {key:'profile_describer',nameKey:'settings_aux_task_profile_describer',descKey:'settings_aux_task_profile_describer_desc'},
- {key:'triage_specifier',nameKey:'settings_aux_task_triage_specifier',descKey:'settings_aux_task_triage_specifier_desc'},
-];
-
 let _auxProviders=[];       // cached provider list from /api/models
+let _auxTasks=[];           // sanitized auxiliary task configs from /api/model/auxiliary
 let _auxOriginalConfig=null; // snapshot of initial config for dirty detection
 let _mainAdvancedConfig=null; // current advanced config for the default chat model
 
 function _auxSelectStyle(){
  return 'width:100%;padding:6px 8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:12px;box-sizing:border-box';
+}
+
+function _auxTaskLabelFromMeta(taskKey, taskCfg){
+  const nameKey='settings_aux_task_'+taskKey;
+  const descKey=nameKey+'_desc';
+  const tName=t(nameKey);
+  const tDesc=t(descKey);
+  const name=(tName&&tName!==nameKey)?String(tName).trim():'';
+  const description=(tDesc&&tDesc!==descKey)?String(tDesc).trim():'';
+  const fallbackName=(taskCfg&&typeof taskCfg.label==='string'&&taskCfg.label.trim())?String(taskCfg.label).trim():taskKey;
+  const fallbackDesc=(taskCfg&&typeof taskCfg.description==='string'&&taskCfg.description.trim())?String(taskCfg.description).trim():'';
+  return {
+    task: taskKey,
+    label: name||fallbackName,
+    description: description||fallbackDesc,
+  };
+}
+
+function _normalizeAuxiliaryTasks(rawTasks){
+  const tasks=Array.isArray(rawTasks)?rawTasks:[];
+  const out=[];
+  const seen=new Set();
+  for(const rawTask of tasks){
+    if(!rawTask||typeof rawTask!=='object') continue;
+    const task=(typeof rawTask.task==='string'?String(rawTask.task).trim():'');
+    if(!task||seen.has(task)) continue;
+    seen.add(task);
+    const meta=_auxTaskLabelFromMeta(task,rawTask);
+    const entry={
+      task,
+      provider:String(rawTask.provider||'auto').trim()||'auto',
+      model:String(rawTask.model||'').trim(),
+      base_url:String(rawTask.base_url||'').trim(),
+      timeout:rawTask.timeout,
+      download_timeout:rawTask.download_timeout,
+      max_concurrency:rawTask.max_concurrency,
+      extra_body:rawTask.extra_body&&typeof rawTask.extra_body==='object'?rawTask.extra_body:{},
+      api_key_set:!!rawTask.api_key_set,
+      label:meta.label,
+      description:meta.description,
+    };
+    out.push(entry);
+  }
+  return out;
 }
 
 function _buildAuxProviderOptions(sel,providers,currentProvider){
@@ -11930,26 +12078,19 @@ function _mainModelSupportsServiceTier(cfg){
  const optgroup=selectedOpt&&selectedOpt.parentElement&&selectedOpt.parentElement.tagName==='OPTGROUP'?selectedOpt.parentElement:null;
  const provider=((selectedOpt&&selectedOpt.dataset&&selectedOpt.dataset.provider)||(optgroup&&optgroup.dataset&&optgroup.dataset.provider)||(cfg&&cfg.provider)||'').trim().toLowerCase();
  if(provider!=='openai'&&provider!=='openai-api'&&provider!=='openai-codex') return false;
- if(provider==='openai-codex') return false;
- const rawModel=String((selectedOpt&&selectedOpt.value)||(selected&&selected.value)||(cfg&&cfg.model)||'').trim().toLowerCase();
- if(!rawModel) return true;
- let bareModel=rawModel;
- if(rawModel.includes('/')){
-  const slash=rawModel.indexOf('/');
-  if(rawModel.slice(0,slash)!=='openai') return false;
-  bareModel=rawModel.slice(slash+1);
- }
- if(bareModel.includes('codex')) return false;
- return bareModel.startsWith('gpt-')||bareModel.startsWith('o1')||bareModel.startsWith('o3')||bareModel.startsWith('o4');
+ const fastSupport = selectedOpt&&selectedOpt.dataset?selectedOpt.dataset.fast:'';
+ if(fastSupport) return fastSupport==='1'||fastSupport==='true';
+ return cfg&&cfg.supports_fast_tier===true;
 }
 
-function _openAuxAdvancedOptions(taskKey,cfg){
- const isMain=taskKey==='__main__';
- const slot=isMain?{key:taskKey,nameKey:'settings_label_model',descKey:'settings_desc_model'}:(_AUX_TASK_SLOTS.find(s=>s.key===taskKey)||{key:taskKey,nameKey:'',descKey:''});
+function _openAuxAdvancedOptions(taskCfg,cfg){
+ const isMain=taskCfg==='__main__';
+ const taskKey=isMain?'__main__':(taskCfg&&typeof taskCfg==='object'&&typeof taskCfg.task==='string'?taskCfg.task:typeof taskCfg==='string'?taskCfg:'');
+ const slot=isMain?{task:taskKey,label:(t('settings_label_model')||'Default model')}:_auxTaskLabelFromMeta(taskKey,taskCfg);
  const overlay=_ensureAuxAdvancedModal();
  overlay.dataset.task=taskKey;
  const title=$('auxAdvancedTitle'),sub=$('auxAdvancedSubtitle'),body=$('auxAdvancedBody');
- const slotName=t(slot.nameKey)||slot.key;
+ const slotName=isMain?(t('settings_label_model')||'Default model'):(slot&&slot.label)||taskKey;
  if(title) title.textContent=isMain?(t('settings_main_advanced_title')||'Main model options'):((t('settings_aux_advanced_title')||'{task} options').replace('{task}',slotName));
  if(sub) sub.textContent=isMain?(t('settings_main_advanced_subtitle')||'Advanced config for the default chat model.'):(t('settings_aux_advanced_subtitle')||'Advanced config for auxiliary.');
  const extraBody=cfg&&cfg.extra_body&&typeof cfg.extra_body==='object'&&Object.keys(cfg.extra_body).length?JSON.stringify(cfg.extra_body,null,2):'';
@@ -12073,68 +12214,68 @@ async function _loadAuxiliaryModels(){
  container.innerHTML='<div style="color:var(--muted);font-size:12px">'+(t('settings_aux_loading')||'Loading…')+'</div>';
 
  try{
- // Fetch auxiliary config AND the WebUI's own /api/models for provider/model lists
- const [auxData,modelsData]=await Promise.all([
- api('/api/model/auxiliary').catch(()=>null),
- api('/api/models').catch(()=>null),
- ]);
- // Build provider list from /api/models groups
- // /api/models returns: { groups: [{ provider: str, provider_id: str, models: [{id,label}] }] }
- const groups=(modelsData&&modelsData.groups)||[];
- _auxProviders=groups.filter(g=>g.provider&&((g.models&&g.models.length>0)||(g.extra_models&&g.extra_models.length>0))).map(g=>({
- slug:g.provider_id||g.provider,
- name:g.provider,
- models:[...(g.models||[]),...(g.extra_models||[])].map(m=>m.id),
- }));
- if(auxData&&Object.prototype.hasOwnProperty.call(auxData,'main')){
- _mainAdvancedConfig=auxData.main||{};
- }else{
- _mainAdvancedConfig=null;
- }
- _bindMainAdvancedOptionsButton();
- const tasks=(auxData&&auxData.tasks)||[];
-  // Build a quick lookup: taskKey → {provider, model}
+  // Fetch auxiliary config AND the WebUI's own /api/models for provider/model lists
+  const [auxData,modelsData]=await Promise.all([
+   api('/api/model/auxiliary').catch(()=>null),
+   api('/api/models').catch(()=>null),
+  ]);
+  // Build provider list from /api/models groups
+  // /api/models returns: { groups: [{ provider: str, provider_id: str, models: [{id,label}] }] }
+  const groups=(modelsData&&modelsData.groups)||[];
+  _auxProviders=groups.filter(g=>g.provider&&((g.models&&g.models.length>0)||(g.extra_models&&g.extra_models.length>0))).map(g=>({
+   slug:g.provider_id||g.provider,
+   name:g.provider,
+   models:[...(g.models||[]),...(g.extra_models||[])].map(m=>m.id),
+  }));
+  if(auxData&&Object.prototype.hasOwnProperty.call(auxData,'main')){
+   _mainAdvancedConfig=auxData.main||{};
+  }else{
+   _mainAdvancedConfig=null;
+  }
+  _bindMainAdvancedOptionsButton();
+  _auxTasks=_normalizeAuxiliaryTasks((auxData&&auxData.tasks)||[]);
+  // Build a quick lookup: taskKey → config
   const taskMap={};
-  for(const t of tasks) taskMap[t.task]=t;
+  for(const task of _auxTasks) taskMap[task.task]=task;
   _auxOriginalConfig=JSON.parse(JSON.stringify(taskMap));
 
   container.innerHTML='';
-  for(const slot of _AUX_TASK_SLOTS){
-   const cfg=taskMap[slot.key]||{provider:'auto',model:''};
+  for(const task of _auxTasks){
+   const cfg=taskMap[task.task]||{provider:'auto',model:''};
    const row=document.createElement('div');
    row.style.cssText='display:grid;grid-template-columns:120px 1fr 1fr 34px;gap:8px;align-items:center;margin-bottom:8px';
 
    // Task name + description
    const label=document.createElement('div');
    label.style.cssText='font-size:12px;font-weight:500;color:var(--text);line-height:1.3';
-   label.innerHTML=esc(t(slot.nameKey)||slot.key)+'<div style="font-size:10px;color:var(--muted);font-weight:400">'+esc(t(slot.descKey)||'')+'</div>';
+   label.innerHTML=esc(task.label||task.task)+'<div style="font-size:10px;color:var(--muted);font-weight:400">'+esc(task.description||'')+'</div>';
    row.appendChild(label);
 
    // Provider select
    const provSel=document.createElement('select');
-   provSel.id='aux-prov-'+slot.key;
+   provSel.id='aux-prov-'+task.task;
    provSel.style.cssText=_auxSelectStyle();
    _buildAuxProviderOptions(provSel,_auxProviders,cfg.provider);
-   provSel.addEventListener('change',()=>_onAuxProviderChange(slot.key,_auxProviders));
+   provSel.addEventListener('change',()=>_onAuxProviderChange(task.task,_auxProviders));
    row.appendChild(provSel);
 
    // Model select
    const modelSel=document.createElement('select');
-   modelSel.id='aux-model-'+slot.key;
+   modelSel.id='aux-model-'+task.task;
    modelSel.style.cssText=_auxSelectStyle();
    _buildAuxModelOptions(modelSel,cfg.provider,_auxProviders,cfg.model);
-   modelSel.addEventListener('change',()=>_onAuxModelChange(slot.key));
+   modelSel.addEventListener('change',()=>_onAuxModelChange(task.task));
    row.appendChild(modelSel);
 
    const advancedBtn=document.createElement('button');
    advancedBtn.type='button';
    advancedBtn.className='aux-advanced-btn model-advanced-btn';
    const advTitle=t('settings_aux_advanced_button_title')||'Advanced options';
-   const slotName=t(slot.nameKey)||slot.key;
+   const taskName=task.label||task.task;
    advancedBtn.title=advTitle;
-   advancedBtn.setAttribute('aria-label',(t('settings_aux_advanced_button_aria')||'Advanced options for {task}').replace('{task}',slotName));
+   advancedBtn.setAttribute('aria-label',(t('settings_aux_advanced_button_aria')||'Advanced options for {task}').replace('{task}',taskName));
    advancedBtn.innerHTML=typeof li==='function'?li('settings',15):'⚙';
-   advancedBtn.addEventListener('click',()=>_openAuxAdvancedOptions(slot.key,cfg));
+   advancedBtn.addEventListener('click',()=>_openAuxAdvancedOptions(task,cfg));
    row.appendChild(advancedBtn);
 
    container.appendChild(row);
@@ -12172,20 +12313,20 @@ async function _loadAuxiliaryModels(){
 
 async function _applyAuxModels(){
  let saved=0;
- for(const slot of _AUX_TASK_SLOTS){
-  const provSel=$('aux-prov-'+slot.key);
-  const modelSel=$('aux-model-'+slot.key);
+ for(const task of _auxTasks){
+  const provSel=$('aux-prov-'+task.task);
+  const modelSel=$('aux-model-'+task.task);
   if(!provSel) continue;
   const provider=provSel.value;
   const model=(modelSel&&modelSel.value!=='__custom__')?(modelSel.value||''):'';
-  const orig=_auxOriginalConfig?.[slot.key]||{provider:'auto',model:''};
+  const orig=_auxOriginalConfig?.[task.task]||{provider:'auto',model:''};
   // Only save if changed
   if(provider!==orig.provider||model!==orig.model){
    try{
-    await api('/api/model/set',{method:'POST',body:JSON.stringify({scope:'auxiliary',task:slot.key,provider,model})});
+    await api('/api/model/set',{method:'POST',body:JSON.stringify({scope:'auxiliary',task:task.task,provider,model})});
     saved++;
    }catch(e){
-    console.warn('[settings] failed to save aux task',slot.key,e);
+    console.warn('[settings] failed to save aux task',task.task,e);
     if(typeof showToast==='function') showToast(t('settings_aux_save_failed')||'Failed to save auxiliary model');
     return;
    }
@@ -12268,6 +12409,7 @@ async function saveSettings(andClose){
   body.pinned_sessions_limit=pinnedSessionsLimit;
   body.sync_to_insights=!!($('settingsSyncInsights')||{}).checked;
   body.check_for_updates=!!($('settingsCheckUpdates')||{}).checked;
+  body.update_channel=($('settingsUpdateChannel')||{}).value==='experimental'?'experimental':'stable';
   body.ignore_agent_updates=!!($('settingsIgnoreAgentUpdates')||{}).checked;
   body.whats_new_summary_enabled=!!($('settingsWhatsNewSummary')||{}).checked;
   body.sound_enabled=!!($('settingsSoundEnabled')||{}).checked;
